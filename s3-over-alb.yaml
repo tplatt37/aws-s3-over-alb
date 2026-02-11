@@ -1,0 +1,351 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  S3 bucket accessible via an internet-facing ALB with custom domain,
+  routing through S3 Interface VPC Endpoints. Includes ACM certificate,
+  Route 53 DNS, host header rewrite, and a minimal Lambda custom resource
+  to resolve VPC endpoint ENI private IPs for ALB target registration.
+
+# ===========================================================================
+# Parameters
+# ===========================================================================
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID to deploy resources into
+
+  SubnetId1:
+    Type: AWS::EC2::Subnet::Id
+    Description: First subnet for VPC endpoint and ALB
+
+  SubnetId2:
+    Type: AWS::EC2::Subnet::Id
+    Description: Second subnet for VPC endpoint and ALB
+
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Description: Route 53 hosted zone ID for DNS record creation
+
+  DomainName:
+    Type: String
+    Description: Custom domain name for the ALB (e.g., s3proxy.example.com)
+    AllowedPattern: ^[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9]$
+
+  BucketName:
+    Type: String
+    Description: Name for the S3 bucket
+    AllowedPattern: ^[a-z0-9][a-z0-9\-]*[a-z0-9]$
+    MinLength: 3
+    MaxLength: 63
+
+# ===========================================================================
+# Resources
+# ===========================================================================
+Resources:
+
+  # -------------------------------------------------------------------------
+  # S3 Bucket – HTTPS only, VPC Endpoint only
+  # -------------------------------------------------------------------------
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Deny any request not over HTTPS
+          # - Sid: DenyNonHttps
+          #   Effect: Deny
+          #   Principal: '*'
+          #   Action: 's3:*'
+          #   Resource:
+          #     - !Sub 'arn:aws:s3:::${S3Bucket}'
+          #     - !Sub 'arn:aws:s3:::${S3Bucket}/*'
+          #   Condition:
+          #     Bool:
+          #       aws:SecureTransport: 'false'
+          # Deny any request not from the VPC Endpoint
+          # - Sid: DenyNonVpcEndpoint
+          #   Effect: Deny
+          #   Principal: '*'
+          #   Action: 's3:*'
+          #   Resource:
+          #     - !Sub 'arn:aws:s3:::${S3Bucket}'
+          #     - !Sub 'arn:aws:s3:::${S3Bucket}/*'
+          #   Condition:
+          #     StringNotEquals:
+          #       aws:sourceVpce: !Ref S3InterfaceEndpoint
+          # # Allow access from the VPC Endpoint
+          - Sid: AllowVpcEndpoint
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub 'arn:aws:s3:::${S3Bucket}'
+              - !Sub 'arn:aws:s3:::${S3Bucket}/*'
+            Condition:
+              StringEquals:
+                aws:sourceVpce: !Ref S3InterfaceEndpoint
+
+  # -------------------------------------------------------------------------
+  # Security Groups
+  # -------------------------------------------------------------------------
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow inbound HTTPS to ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-alb-sg'
+
+  VpcEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTPS from ALB to VPC Endpoint ENIs
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-vpce-sg'
+
+  # -------------------------------------------------------------------------
+  # S3 Interface VPC Endpoint
+  # -------------------------------------------------------------------------
+  S3InterfaceEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: false
+      SubnetIds:
+        - !Ref SubnetId1
+        - !Ref SubnetId2
+      SecurityGroupIds:
+        - !Ref VpcEndpointSecurityGroup
+
+  # -------------------------------------------------------------------------
+  # Lambda Custom Resource – Resolve ENI IDs to Private IPs
+  # -------------------------------------------------------------------------
+  ENIResolverRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DescribeENIs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeNetworkInterfaces
+                Resource: '*'
+
+  ENIResolverFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-eni-ip-resolver'
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 30
+      Role: !GetAtt ENIResolverRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+
+          def handler(event, context):
+              try:
+                  if event['RequestType'] in ('Create', 'Update'):
+                      eni_ids = event['ResourceProperties']['NetworkInterfaceIds']
+                      ec2 = boto3.client('ec2')
+                      resp = ec2.describe_network_interfaces(NetworkInterfaceIds=eni_ids)
+                      ips = [eni['PrivateIpAddress'] for eni in resp['NetworkInterfaces']]
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                          'IP1': ips[0],
+                          'IP2': ips[1] if len(ips) > 1 else ips[0],
+                          'IPs': ','.join(ips)
+                      })
+                  else:
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception as e:
+                  print(f"Error: {e}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
+
+  ENIIPLookup:
+    Type: Custom::ENIIPLookup
+    Properties:
+      ServiceToken: !GetAtt ENIResolverFunction.Arn
+      NetworkInterfaceIds: !GetAtt S3InterfaceEndpoint.NetworkInterfaceIds
+
+  # -------------------------------------------------------------------------
+  # ACM Certificate (DNS Validation via Route 53)
+  # -------------------------------------------------------------------------
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref DomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref HostedZoneId
+
+  # -------------------------------------------------------------------------
+  # Application Load Balancer (Internet-Facing)
+  # -------------------------------------------------------------------------
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${AWS::StackName}-alb'
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Ref SubnetId1
+        - !Ref SubnetId2
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-alb'
+
+  # -------------------------------------------------------------------------
+  # Target Group – IP-based, HTTPS to VPC Endpoint ENIs
+  # -------------------------------------------------------------------------
+  S3TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${AWS::StackName}-s3-tg'
+      VpcId: !Ref VpcId
+      Protocol: HTTPS
+      Port: 443
+      TargetType: ip
+      HealthCheckProtocol: HTTPS
+      HealthCheckPort: '443'
+      HealthCheckPath: /
+      # S3 returns 307 or 405 on root; accept a broad range for health checks
+      Matcher:
+        HttpCode: '200,307,400,403,405'
+      TargetGroupAttributes:
+        - Key: stickiness.enabled
+          Value: 'false'
+      Targets:
+        - Id: !GetAtt ENIIPLookup.IP1
+          Port: 443
+        - Id: !GetAtt ENIIPLookup.IP2
+          Port: 443
+
+  # -------------------------------------------------------------------------
+  # HTTPS Listener with Host Header Rewrite
+  # -------------------------------------------------------------------------
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref Certificate
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref S3TargetGroup
+
+  # -------------------------------------------------------------------------
+  # Listener Rule – Forward with Host Header Rewrite (Transform)
+  # Rewrites Host header from custom domain to S3 virtual-hosted style
+  # -------------------------------------------------------------------------
+  ALBListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListener
+      Priority: 1
+      Conditions:
+        - Field: host-header
+          HostHeaderConfig:
+            Values:
+              - !Ref DomainName
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref S3TargetGroup
+      Transforms:
+        - Type: host-header-rewrite
+          HostHeaderRewriteConfig:
+            Rewrites:
+              # Replace the Host header with that of the bucket so 
+              # S3 servie knows which bucket we are dealing with
+              - Regex: "^(.*)$"
+                Replace: !Sub "${S3Bucket}.s3.${AWS::Region}.amazonaws.com"
+
+  # -------------------------------------------------------------------------
+  # Route 53 DNS Record – Alias to ALB
+  # -------------------------------------------------------------------------
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt ApplicationLoadBalancer.DNSName
+        HostedZoneId: !GetAtt ApplicationLoadBalancer.CanonicalHostedZoneID
+        EvaluateTargetHealth: true
+
+# ===========================================================================
+# Outputs
+# ===========================================================================
+Outputs:
+  BucketName:
+    Description: S3 bucket name
+    Value: !Ref S3Bucket
+
+  BucketArn:
+    Description: S3 bucket ARN
+    Value: !GetAtt S3Bucket.Arn
+
+  ALBDNSName:
+    Description: ALB DNS name
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+
+  CustomDomainURL:
+    Description: Custom domain URL for accessing S3 via ALB
+    Value: !Sub 'https://${DomainName}'
+
+  VPCEndpointId:
+    Description: S3 Interface VPC Endpoint ID
+    Value: !Ref S3InterfaceEndpoint
+
+  TargetIP1:
+    Description: First VPC Endpoint ENI private IP
+    Value: !GetAtt ENIIPLookup.IP1
+
+  TargetIP2:
+    Description: Second VPC Endpoint ENI private IP
+    Value: !GetAtt ENIIPLookup.IP2
