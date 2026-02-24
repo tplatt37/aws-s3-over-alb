@@ -1,0 +1,370 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  VPC with one public subnet, one private subnet, an AWS Client VPN
+  endpoint targeting the private subnet, a free S3 Gateway Endpoint,
+  and an S3 Interface Endpoint (PrivateLink) for VPN client S3 access.
+
+# ============================================================
+# Parameters
+# ============================================================
+Parameters:
+
+  VpcCidr:
+    Type: String
+    Default: '10.0.0.0/16'
+    Description: CIDR block for the VPC.
+
+  PublicSubnetCidr:
+    Type: String
+    Default: '10.0.1.0/24'
+    Description: CIDR block for the public subnet.
+
+  PrivateSubnetCidr:
+    Type: String
+    Default: '10.0.2.0/24'
+    Description: CIDR block for the private subnet (AZ 1).
+
+  PrivateSubnet2Cidr:
+    Type: String
+    Default: '10.0.3.0/24'
+    Description: CIDR block for the second private subnet (AZ 2).
+
+  ClientVpnCidr:
+    Type: String
+    Default: '10.1.0.0/16'
+    Description: >-
+      IP range assigned to VPN clients. Must NOT overlap the VPC CIDR
+      or any associated subnet.
+
+  ServerCertificateArn:
+    Type: String
+    Description: ARN of the server TLS certificate imported into ACM.
+
+  ClientCertificateArn:
+    Type: String
+    Description: >-
+      ARN of the client root CA certificate imported into ACM.
+      For mutual auth, may be the same ARN as the server cert if both
+      were issued by the same CA.
+
+# ============================================================
+# Resources
+# ============================================================
+Resources:
+
+  # ----------------------------------------------------------
+  # VPC
+  # ----------------------------------------------------------
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-vpc'
+
+  # ----------------------------------------------------------
+  # Internet Gateway
+  # ----------------------------------------------------------
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-igw'
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # ----------------------------------------------------------
+  # Public Subnet + Route Table
+  # ----------------------------------------------------------
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnetCidr
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-subnet'
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-rt'
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # ----------------------------------------------------------
+  # Private Subnet + Route Table
+  # No default route — no NAT Gateway.
+  # ----------------------------------------------------------
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnetCidr
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-private-subnet'
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-private-rt'
+
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ----------------------------------------------------------
+  # Second Private Subnet + Route Table (required for ALB)
+  # Placed in a different AZ from the first private subnet.
+  # No default route — no NAT Gateway.
+  # ----------------------------------------------------------
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet2Cidr
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-private-subnet-2'
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-private-rt-2'
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable2
+
+  # ----------------------------------------------------------
+  # S3 Gateway Endpoint — FREE
+  # Required by AWS before an S3 Interface Endpoint can enable
+  # private DNS. Also handles all in-VPC S3 traffic at no cost.
+  # NOTE: Tags are NOT supported on Gateway-type endpoints —
+  # omitting them here avoids the cfn-lint / API validation error.
+  # ----------------------------------------------------------
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Gateway
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcId: !Ref VPC
+      RouteTableIds:
+        - !Ref PublicRouteTable
+        - !Ref PrivateRouteTable
+        - !Ref PrivateRouteTable2
+
+  # ----------------------------------------------------------
+  # Security Group — S3 Interface Endpoint
+  # ----------------------------------------------------------
+  S3EndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTPS to S3 Interface Endpoint from VPC and VPN clients
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCidr
+          Description: HTTPS from VPC resources
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref ClientVpnCidr
+          Description: HTTPS from VPN clients
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: '0.0.0.0/0'
+          Description: Allow all outbound
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-s3-endpoint-sg'
+
+  # ----------------------------------------------------------
+  # S3 Interface Endpoint (PrivateLink)
+  # DependsOn the Gateway Endpoint — AWS requires it to exist
+  # first before PrivateDnsEnabled can be set to true.
+  # ----------------------------------------------------------
+  S3InterfaceEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    DependsOn: S3GatewayEndpoint
+    Properties:
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcId: !Ref VPC
+      SubnetIds:
+        - !Ref PrivateSubnet
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref S3EndpointSecurityGroup
+      PrivateDnsEnabled: true
+
+  # ----------------------------------------------------------
+  # Security Group — Client VPN Endpoint
+  # ----------------------------------------------------------
+  ClientVpnSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Controls traffic to/from the Client VPN endpoint
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: udp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: '0.0.0.0/0'
+          Description: Allow inbound VPN client connections
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: '0.0.0.0/0'
+          Description: Allow all outbound traffic
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-cvpn-sg'
+
+  # ----------------------------------------------------------
+  # CloudWatch Log Group / Stream for VPN connection logs
+  # ----------------------------------------------------------
+  VpnLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/clientvpn/${AWS::StackName}'
+      RetentionInDays: 30
+
+  VpnLogStream:
+    Type: AWS::Logs::LogStream
+    Properties:
+      LogGroupName: !Ref VpnLogGroup
+      LogStreamName: connections
+
+  # ----------------------------------------------------------
+  # Client VPN Endpoint
+  # ----------------------------------------------------------
+  ClientVpnEndpoint:
+    Type: AWS::EC2::ClientVpnEndpoint
+    Properties:
+      Description: !Sub '${AWS::StackName} – private subnet access'
+      ClientCidrBlock: !Ref ClientVpnCidr
+      ServerCertificateArn: !Ref ServerCertificateArn
+      AuthenticationOptions:
+        - Type: certificate-authentication
+          MutualAuthentication:
+            ClientRootCertificateChainArn: !Ref ClientCertificateArn
+      ConnectionLogOptions:
+        Enabled: true
+        CloudwatchLogGroup: !Ref VpnLogGroup
+        CloudwatchLogStream: !Ref VpnLogStream
+      SecurityGroupIds:
+        - !Ref ClientVpnSecurityGroup
+      VpcId: !Ref VPC
+      SplitTunnel: true
+      TransportProtocol: udp
+      VpnPort: 443
+
+  # ----------------------------------------------------------
+  # Associate the VPN endpoint with the PRIVATE subnet
+  # ----------------------------------------------------------
+  ClientVpnAssociation:
+    Type: AWS::EC2::ClientVpnTargetNetworkAssociation
+    Properties:
+      ClientVpnEndpointId: !Ref ClientVpnEndpoint
+      SubnetId: !Ref PrivateSubnet
+
+  # ----------------------------------------------------------
+  # Authorization Rule — all VPN clients → private subnet
+  # ----------------------------------------------------------
+  ClientVpnAuthRule:
+    Type: AWS::EC2::ClientVpnAuthorizationRule
+    DependsOn: ClientVpnAssociation
+    Properties:
+      ClientVpnEndpointId: !Ref ClientVpnEndpoint
+      TargetNetworkCidr: !Ref PrivateSubnetCidr
+      AuthorizeAllGroups: true
+      Description: Allow all authenticated VPN clients to reach the private subnet
+
+# ============================================================
+# Outputs
+# ============================================================
+Outputs:
+
+  VpcId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${AWS::StackName}-VpcId'
+
+  PublicSubnetId:
+    Description: Public Subnet ID
+    Value: !Ref PublicSubnet
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicSubnetId'
+
+  PrivateSubnetId:
+    Description: Private Subnet ID (AZ 1)
+    Value: !Ref PrivateSubnet
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateSubnetId'
+
+  PrivateSubnet2Id:
+    Description: Private Subnet 2 ID (AZ 2)
+    Value: !Ref PrivateSubnet2
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateSubnet2Id'
+
+  ClientVpnEndpointId:
+    Description: Client VPN Endpoint ID
+    Value: !Ref ClientVpnEndpoint
+    Export:
+      Name: !Sub '${AWS::StackName}-ClientVpnEndpointId'
+
+  S3GatewayEndpointId:
+    Description: S3 Gateway Endpoint ID (free, handles in-VPC traffic)
+    Value: !Ref S3GatewayEndpoint
+    Export:
+      Name: !Sub '${AWS::StackName}-S3GatewayEndpointId'
+
+  S3InterfaceEndpointId:
+    Description: S3 Interface Endpoint ID (handles VPN client S3 traffic)
+    Value: !Ref S3InterfaceEndpoint
+    Export:
+      Name: !Sub '${AWS::StackName}-S3InterfaceEndpointId'

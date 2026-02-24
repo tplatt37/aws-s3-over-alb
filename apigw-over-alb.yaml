@@ -265,7 +265,7 @@ Resources:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
       Name: !Sub '${AWS::StackName}-alb'
-      Scheme: internet-facing
+      Scheme: internal 
       Type: application
       Subnets:
         - !Ref SubnetId1
