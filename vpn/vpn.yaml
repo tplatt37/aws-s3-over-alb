@@ -1,8 +1,10 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  VPC with one public subnet, one private subnet, an AWS Client VPN
-  endpoint targeting the private subnet, a free S3 Gateway Endpoint,
+  VPC with two public subnets, two private subnets, an AWS Client VPN
+  endpoint targeting both private subnets, a free S3 Gateway Endpoint,
   and an S3 Interface Endpoint (PrivateLink) for VPN client S3 access.
+  NOTE: The private subnets do not have Internet access as there is no NAT Gateway
+  (Simply to minimize cost)
 
 # ============================================================
 # Parameters
@@ -17,7 +19,12 @@ Parameters:
   PublicSubnetCidr:
     Type: String
     Default: '10.0.1.0/24'
-    Description: CIDR block for the public subnet.
+    Description: CIDR block for the public subnet (AZ 1).
+
+  PublicSubnet2Cidr:
+    Type: String
+    Default: '10.0.5.0/24'
+    Description: CIDR block for the second public subnet (AZ 2).
 
   PrivateSubnetCidr:
     Type: String
@@ -115,6 +122,28 @@ Resources:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # ----------------------------------------------------------
+  # Second Public Subnet
+  # Placed in a different AZ from the first public subnet.
+  # Shares the same Public Route Table (same IGW default route).
+  # ----------------------------------------------------------
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet2Cidr
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-subnet-2'
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
       RouteTableId: !Ref PublicRouteTable
 
   # ----------------------------------------------------------
@@ -302,7 +331,7 @@ Resources:
       VpnPort: 443
 
   # ----------------------------------------------------------
-  # Associate the VPN endpoint with the PRIVATE subnet
+  # Associate the VPN endpoint with BOTH private subnets
   # ----------------------------------------------------------
   ClientVpnAssociation:
     Type: AWS::EC2::ClientVpnTargetNetworkAssociation
@@ -310,8 +339,14 @@ Resources:
       ClientVpnEndpointId: !Ref ClientVpnEndpoint
       SubnetId: !Ref PrivateSubnet
 
+  ClientVpnAssociation2:
+    Type: AWS::EC2::ClientVpnTargetNetworkAssociation
+    Properties:
+      ClientVpnEndpointId: !Ref ClientVpnEndpoint
+      SubnetId: !Ref PrivateSubnet2
+
   # ----------------------------------------------------------
-  # Authorization Rule — all VPN clients → private subnet
+  # Authorization Rules — all VPN clients → both private subnets
   # ----------------------------------------------------------
   ClientVpnAuthRule:
     Type: AWS::EC2::ClientVpnAuthorizationRule
@@ -320,7 +355,16 @@ Resources:
       ClientVpnEndpointId: !Ref ClientVpnEndpoint
       TargetNetworkCidr: !Ref PrivateSubnetCidr
       AuthorizeAllGroups: true
-      Description: Allow all authenticated VPN clients to reach the private subnet
+      Description: Allow all authenticated VPN clients to reach private subnet 1
+
+  ClientVpnAuthRule2:
+    Type: AWS::EC2::ClientVpnAuthorizationRule
+    DependsOn: ClientVpnAssociation2
+    Properties:
+      ClientVpnEndpointId: !Ref ClientVpnEndpoint
+      TargetNetworkCidr: !Ref PrivateSubnet2Cidr
+      AuthorizeAllGroups: true
+      Description: Allow all authenticated VPN clients to reach private subnet 2
 
 # ============================================================
 # Outputs
@@ -334,10 +378,16 @@ Outputs:
       Name: !Sub '${AWS::StackName}-VpcId'
 
   PublicSubnetId:
-    Description: Public Subnet ID
+    Description: Public Subnet ID (AZ 1)
     Value: !Ref PublicSubnet
     Export:
       Name: !Sub '${AWS::StackName}-PublicSubnetId'
+
+  PublicSubnet2Id:
+    Description: Public Subnet 2 ID (AZ 2)
+    Value: !Ref PublicSubnet2
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicSubnet2Id'
 
   PrivateSubnetId:
     Description: Private Subnet ID (AZ 1)

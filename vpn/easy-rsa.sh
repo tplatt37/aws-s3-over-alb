@@ -14,14 +14,14 @@ cd easy-rsa/easyrsa3
 
 # Import SERVER cert to ACM — note the returned ARN
 aws acm import-certificate \
-  --certificate fileb://pki/issued/server.crt \
-  --private-key fileb://pki/private/server.key \
+  --certificate fileb://pki/issued/vpn.example.com.crt \
+  --private-key fileb://pki/private/vpn.example.com.key \
   --certificate-chain fileb://pki/ca.crt \
   --region "us-east-1"
 
 # Import CLIENT cert to ACM — note the returned ARN
 aws acm import-certificate \
-  --certificate fileb://pki/issued/client1.crt \
-  --private-key fileb://pki/private/client1.key \
+  --certificate fileb://pki/issued/client.vpn.example.com.crt \
+  --private-key fileb://pki/private/client.vpn.example.com.key \
   --certificate-chain fileb://pki/ca.crt \
   --region "us-east-1"
