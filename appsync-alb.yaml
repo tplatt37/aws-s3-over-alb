@@ -1,0 +1,490 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Internal ALB with NGINX reverse proxy for AWS AppSync Private API.
+  Enables a custom private domain name for an existing AppSync Private API
+  accessible via a VPC Interface Endpoint. Deploys an internal ALB, an
+  Auto Scaling Group (1/1/1) with NGINX proxy, Route 53 record, and ACM certificate.
+
+# ==========================================================
+# Parameters
+# ==========================================================
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID where all resources will be deployed
+
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: >-
+      At least 2 private subnets in different AZs (used for ALB and ASG)
+
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Description: >-
+      Route 53 Hosted Zone ID for the custom domain A record
+
+  CustomDomainName:
+    Type: String
+    Description: >-
+      Custom domain name for the AppSync API
+      (e.g., graphql.internal.example.com)
+
+  AppSyncApiId:
+    Type: String
+    Description: Existing AppSync Private API ID
+    MinLength: 1
+
+  AppSyncVpceEndpointDns:
+    Type: String
+    Description: >-
+      Regional DNS name of the existing AppSync VPC Interface Endpoint.
+      (e.g., vpce-0abc123def.appsync-api.us-east-1.vpce.amazonaws.com)
+    MinLength: 1
+
+  ExistingCertificateArn:
+    Type: String
+    Default: ''
+    Description: >-
+      (Optional) ARN of an existing ACM or Private CA certificate. If left
+      empty, a new ACM certificate is created via DNS validation using the
+      provided Hosted Zone. NOTE: ACM DNS validation requires the domain
+      to be resolvable via PUBLIC DNS. For private-only domains, create a
+      certificate with AWS Private CA and provide the ARN here.
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    Description: EC2 instance type for the NGINX proxy
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+      - t3.large
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: SSM parameter for latest Amazon Linux 2023 AMI
+
+  AllowedCidrBlock:
+    Type: String
+    Default: 10.0.0.0/8
+    Description: >-
+      CIDR block allowed to reach the ALB on port 443
+      (e.g., Client VPN CIDR or VPC CIDR)
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    ConstraintDescription: Must be a valid CIDR block (e.g. 10.0.0.0/8)
+
+# ==========================================================
+# Metadata - Console Parameter Grouping
+# ==========================================================
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Network Configuration
+        Parameters:
+          - VpcId
+          - PrivateSubnetIds
+          - AllowedCidrBlock
+      - Label:
+          default: Domain & Certificate
+        Parameters:
+          - HostedZoneId
+          - CustomDomainName
+          - ExistingCertificateArn
+      - Label:
+          default: AppSync Configuration
+        Parameters:
+          - AppSyncApiId
+          - AppSyncVpceEndpointDns
+      - Label:
+          default: EC2 Configuration
+        Parameters:
+          - InstanceType
+          - LatestAmiId
+    ParameterLabels:
+      VpcId:
+        default: VPC
+      PrivateSubnetIds:
+        default: Private Subnets (min 2 AZs)
+      HostedZoneId:
+        default: Route 53 Hosted Zone ID
+      CustomDomainName:
+        default: Custom Domain Name
+      ExistingCertificateArn:
+        default: Existing Certificate ARN (leave blank to create new)
+      AppSyncApiId:
+        default: AppSync API ID
+      AppSyncVpceEndpointDns:
+        default: AppSync VPC Endpoint DNS Name
+      InstanceType:
+        default: NGINX Proxy Instance Type
+      AllowedCidrBlock:
+        default: Allowed Inbound CIDR
+      LatestAmiId:
+        default: AMI ID (Amazon Linux 2023)
+
+# ==========================================================
+# Conditions
+# ==========================================================
+Conditions:
+  CreateNewCertificate: !Equals [!Ref ExistingCertificateArn, '']
+
+# ==========================================================
+# Resources
+# ==========================================================
+Resources:
+
+  # -----------------------------------------------
+  # ACM Certificate (created only if no ARN given)
+  # -----------------------------------------------
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Condition: CreateNewCertificate
+    Properties:
+      DomainName: !Ref CustomDomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref CustomDomainName
+          HostedZoneId: !Ref HostedZoneId
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-cert'
+
+  # -----------------------------------------------
+  # Security Groups
+  # -----------------------------------------------
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${AWS::StackName} - Internal ALB (HTTPS inbound)'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref AllowedCidrBlock
+          Description: HTTPS from VPN / VPC clients
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-alb-sg'
+
+  NginxSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${AWS::StackName} - NGINX proxy (HTTP from ALB only)'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: HTTP from ALB
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS to AppSync VPCE and AWS services
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP for package repos
+        - IpProtocol: udp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: 0.0.0.0/0
+          Description: DNS (UDP)
+        - IpProtocol: tcp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: 0.0.0.0/0
+          Description: DNS (TCP)
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-nginx-sg'
+
+  # -----------------------------------------------
+  # IAM Role & Instance Profile (SSM access)
+  # -----------------------------------------------
+  NginxRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-nginx-role'
+
+  NginxInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref NginxRole
+
+  # -----------------------------------------------
+  # Launch Template (NGINX reverse proxy)
+  # -----------------------------------------------
+  NginxLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt NginxInstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref NginxSecurityGroup
+        MetadataOptions:
+          HttpTokens: required
+          HttpEndpoint: enabled
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub '${AWS::StackName}-nginx-proxy'
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash -xe
+            exec > >(tee /var/log/user-data.log) 2>&1
+            echo "==========================================="
+            echo " Starting NGINX proxy setup for AppSync"
+            echo "==========================================="
+
+            # ---- Install NGINX ----
+            dnf install -y nginx
+
+            # ---- Write main nginx.conf ----
+            cat > /etc/nginx/nginx.conf << 'NGINXMAIN'
+            user nginx;
+            worker_processes auto;
+            error_log /var/log/nginx/error.log notice;
+            pid /run/nginx.pid;
+
+            events {
+                worker_connections 1024;
+            }
+
+            http {
+                underscores_in_headers on;
+
+                log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                                '$status $body_bytes_sent "$http_referer" '
+                                '"$http_user_agent"';
+                access_log  /var/log/nginx/access.log main;
+                sendfile        on;
+                tcp_nopush      on;
+                keepalive_timeout  65;
+                types_hash_max_size 4096;
+                include       /etc/nginx/mime.types;
+                default_type  application/octet-stream;
+                include       /etc/nginx/conf.d/*.conf;
+            }
+            NGINXMAIN
+
+            # ---- Write AppSync reverse-proxy virtual host ----
+            #
+            # Uses the AppSync domain directly in proxy_pass.
+            # Private DNS on the VPC endpoint resolves this to
+            # the VPCE ENI private IPs automatically.
+            #
+            cat > /etc/nginx/conf.d/appsync-proxy.conf << PROXYCONF
+            server {
+                listen 80;
+                server_name _;
+
+                resolver 169.254.169.253 valid=30s ipv6=off;
+
+                # ---------- ALB health check ----------
+                location /health {
+                    access_log off;
+                    return 200 'healthy\n';
+                    add_header Content-Type text/plain;
+                }
+
+                # ---------- Proxy to AppSync Private API ----------
+                location / {
+                    proxy_pass https://${AppSyncApiId}.appsync-api.${AWS::Region}.amazonaws.com;
+                    proxy_ssl_server_name on;
+
+                    # CRITICAL: these two headers route to the correct Private API
+                    proxy_set_header Host             ${AppSyncApiId}.appsync-api.${AWS::Region}.amazonaws.com;
+                    proxy_set_header x-appsync-domain ${AppSyncApiId}.appsync-api.${AWS::Region}.amazonaws.com;
+
+                    # Pass through all client headers (x-api-key, Authorization, etc.)
+                    proxy_pass_request_headers on;
+
+                    # Standard forwarding headers
+                    proxy_set_header X-Real-IP        \$remote_addr;
+                    proxy_set_header X-Forwarded-For  \$proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto https;
+
+                    # Timeouts
+                    proxy_connect_timeout  10s;
+                    proxy_read_timeout     30s;
+                    proxy_send_timeout     30s;
+                }
+            }
+            PROXYCONF
+
+            # ---- Remove default site if present ----
+            rm -f /etc/nginx/conf.d/default.conf
+
+            # ---- Validate & start ----
+            nginx -t
+            systemctl enable nginx
+            systemctl start nginx
+
+            echo "==========================================="
+            echo " NGINX proxy is running"
+            echo " AppSync domain: ${AppSyncApiId}.appsync-api.${AWS::Region}.amazonaws.com"
+            echo " Private DNS resolves domain to VPCE ENI IPs"
+            echo "==========================================="
+
+  # -----------------------------------------------
+  # ALB Target Group
+  # -----------------------------------------------
+  NginxTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Protocol: HTTP
+      Port: 80
+      VpcId: !Ref VpcId
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: '80'
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '30'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-tg'
+
+  # -----------------------------------------------
+  # Internal Application Load Balancer
+  # -----------------------------------------------
+  InternalALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internal
+      Type: application
+      IpAddressType: ipv4
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Subnets: !Ref PrivateSubnetIds
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '60'
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: 'true'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-alb'
+
+  # -----------------------------------------------
+  # HTTPS Listener (TLS 1.3)
+  # -----------------------------------------------
+  ALBHttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref InternalALB
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates:
+        - CertificateArn: !If
+            - CreateNewCertificate
+            - !Ref Certificate
+            - !Ref ExistingCertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref NginxTargetGroup
+
+  # -----------------------------------------------
+  # Auto Scaling Group (1 / 1 / 1)
+  # -----------------------------------------------
+  NginxAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: ALBHttpsListener
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref NginxLaunchTemplate
+        Version: !GetAtt NginxLaunchTemplate.LatestVersionNumber
+      MinSize: '1'
+      MaxSize: '1'
+      DesiredCapacity: '1'
+      VPCZoneIdentifier: !Ref PrivateSubnetIds
+      TargetGroupARNs:
+        - !Ref NginxTargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 180
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-nginx-asg'
+          PropagateAtLaunch: false
+
+  # -----------------------------------------------
+  # Route 53 DNS Record → ALB
+  # -----------------------------------------------
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref CustomDomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt InternalALB.DNSName
+        HostedZoneId: !GetAtt InternalALB.CanonicalHostedZoneID
+        EvaluateTargetHealth: true
+
+# ==========================================================
+# Outputs
+# ==========================================================
+Outputs:
+  CustomDomainEndpoint:
+    Description: Your custom-domain GraphQL endpoint
+    Value: !Sub 'https://${CustomDomainName}/graphql'
+
+  ALBDNSName:
+    Description: Internal ALB DNS name
+    Value: !GetAtt InternalALB.DNSName
+
+  ALBArn:
+    Description: Internal ALB ARN
+    Value: !Ref InternalALB
+
+  AppSyncOriginalDomain:
+    Description: Original AppSync API domain (proxied behind NGINX)
+    Value: !Sub '${AppSyncApiId}.appsync-api.${AWS::Region}.amazonaws.com'
+
+  CertificateArnInUse:
+    Description: ACM Certificate ARN attached to the ALB listener
+    Value: !If
+      - CreateNewCertificate
+      - !Ref Certificate
+      - !Ref ExistingCertificateArn
+
+  NginxSecurityGroupId:
+    Description: Security Group ID for the NGINX proxy instances
+    Value: !Ref NginxSecurityGroup
+
+  ALBSecurityGroupId:
+    Description: Security Group ID for the ALB
+    Value: !Ref ALBSecurityGroup
