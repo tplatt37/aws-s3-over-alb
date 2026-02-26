@@ -392,6 +392,49 @@ Resources:
       PrivateDnsEnabled: true
 
   # ----------------------------------------------------------
+  # Security Group — CloudFormation Interface Endpoint
+  # ----------------------------------------------------------
+  CloudFormationEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTPS to CloudFormation Interface Endpoint from VPC and VPN clients
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCidr
+          Description: HTTPS from VPC resources
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref ClientVpnCidr
+          Description: HTTPS from VPN clients
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: '0.0.0.0/0'
+          Description: Allow all outbound
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-cfn-endpoint-sg'
+
+  # ----------------------------------------------------------
+  # CloudFormation Interface Endpoint (PrivateLink)
+  # ----------------------------------------------------------
+  CloudFormationEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.cloudformation'
+      VpcId: !Ref VPC
+      SubnetIds:
+        - !Ref PrivateSubnet
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref CloudFormationEndpointSecurityGroup
+      PrivateDnsEnabled: true
+
+  # ----------------------------------------------------------
   # IAM Role — Jumpbox EC2 instance
   # Grants SSM Session Manager access and full admin capability.
   # ----------------------------------------------------------
@@ -614,6 +657,12 @@ Outputs:
     Value: !Ref AppSyncInterfaceEndpoint
     Export:
       Name: !Sub '${AWS::StackName}-AppSyncInterfaceEndpointId'
+
+  CloudFormationEndpointId:
+    Description: CloudFormation Interface Endpoint ID (PrivateLink)
+    Value: !Ref CloudFormationEndpoint
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudFormationEndpointId'
 
   JumpboxInstanceId:
     Description: Jumpbox EC2 Instance ID (access via SSM Session Manager)
