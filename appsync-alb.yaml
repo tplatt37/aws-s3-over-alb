@@ -29,17 +29,16 @@ Parameters:
       Custom domain name for the AppSync API
       (e.g., graphql.internal.example.com)
 
-  AppSyncApiId:
-    Type: String
-    Description: Existing AppSync Private API ID
-    MinLength: 1
-
-  AppSyncVpceEndpointDns:
+  AppSyncDomainName:
     Type: String
     Description: >-
-      Regional DNS name of the existing AppSync VPC Interface Endpoint.
-      (e.g., vpce-0abc123def.appsync-api.us-east-1.vpce.amazonaws.com)
+      Full domain name of the AppSync Private API
+      (e.g., abcdef1234.appsync-api.us-east-1.amazonaws.com)
     MinLength: 1
+    AllowedPattern: '^[a-z0-9]+\.appsync-api\.[a-z0-9-]+\.amazonaws\.com$'
+    ConstraintDescription: >-
+      Must be a valid AppSync domain
+      (e.g., abcdef1234.appsync-api.us-east-1.amazonaws.com)
 
   ExistingCertificateArn:
     Type: String
@@ -96,8 +95,7 @@ Metadata:
       - Label:
           default: AppSync Configuration
         Parameters:
-          - AppSyncApiId
-          - AppSyncVpceEndpointDns
+          - AppSyncDomainName
       - Label:
           default: EC2 Configuration
         Parameters:
@@ -114,10 +112,8 @@ Metadata:
         default: Custom Domain Name
       ExistingCertificateArn:
         default: Existing Certificate ARN (leave blank to create new)
-      AppSyncApiId:
-        default: AppSync API ID
-      AppSyncVpceEndpointDns:
-        default: AppSync VPC Endpoint DNS Name
+      AppSyncDomainName:
+        default: AppSync GraphQL Endpoint DNS Name
       InstanceType:
         default: NGINX Proxy Instance Type
       AllowedCidrBlock:
@@ -292,11 +288,6 @@ Resources:
             NGINXMAIN
 
             # ---- Write AppSync reverse-proxy virtual host ----
-            #
-            # Uses the AppSync domain directly in proxy_pass.
-            # Private DNS on the VPC endpoint resolves this to
-            # the VPCE ENI private IPs automatically.
-            #
             cat > /etc/nginx/conf.d/appsync-proxy.conf << PROXYCONF
             server {
                 listen 80;
@@ -313,12 +304,12 @@ Resources:
 
                 # ---------- Proxy to AppSync Private API ----------
                 location / {
-                    proxy_pass https://${AppSyncApiId}.appsync-api.${AWS::Region}.amazonaws.com;
+                    proxy_pass https://${AppSyncDomainName};
                     proxy_ssl_server_name on;
 
-                    # CRITICAL: these two headers route to the correct Private API
-                    proxy_set_header Host             ${AppSyncApiId}.appsync-api.${AWS::Region}.amazonaws.com;
-                    proxy_set_header x-appsync-domain ${AppSyncApiId}.appsync-api.${AWS::Region}.amazonaws.com;
+                    # CRITICAL: route to the correct Private API
+                    proxy_set_header Host             ${AppSyncDomainName};
+                    proxy_set_header x-appsync-domain ${AppSyncDomainName};
 
                     # Pass through all client headers (x-api-key, Authorization, etc.)
                     proxy_pass_request_headers on;
@@ -346,9 +337,10 @@ Resources:
 
             echo "==========================================="
             echo " NGINX proxy is running"
-            echo " AppSync domain: ${AppSyncApiId}.appsync-api.${AWS::Region}.amazonaws.com"
-            echo " Private DNS resolves domain to VPCE ENI IPs"
+            echo " AppSync domain: ${AppSyncDomainName}"
             echo "==========================================="
+
+
 
   # -----------------------------------------------
   # ALB Target Group
@@ -469,10 +461,6 @@ Outputs:
   ALBArn:
     Description: Internal ALB ARN
     Value: !Ref InternalALB
-
-  AppSyncOriginalDomain:
-    Description: Original AppSync API domain (proxied behind NGINX)
-    Value: !Sub '${AppSyncApiId}.appsync-api.${AWS::Region}.amazonaws.com'
 
   CertificateArnInUse:
     Description: ACM Certificate ARN attached to the ALB listener
