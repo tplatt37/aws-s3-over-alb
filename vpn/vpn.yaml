@@ -270,6 +270,196 @@ Resources:
       PrivateDnsEnabled: true
 
   # ----------------------------------------------------------
+  # Security Group — AppSync Interface Endpoint
+  # ----------------------------------------------------------
+  AppSyncEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTPS to AppSync Interface Endpoint from VPC and VPN clients
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCidr
+          Description: HTTPS from VPC resources
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref ClientVpnCidr
+          Description: HTTPS from VPN clients
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: '0.0.0.0/0'
+          Description: Allow all outbound
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-appsync-endpoint-sg'
+
+  # ----------------------------------------------------------
+  # AppSync Interface Endpoint (PrivateLink)
+  # ----------------------------------------------------------
+  AppSyncInterfaceEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.appsync-api'
+      VpcId: !Ref VPC
+      SubnetIds:
+        - !Ref PrivateSubnet
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref AppSyncEndpointSecurityGroup
+      PrivateDnsEnabled: true
+
+  # ----------------------------------------------------------
+  # Security Group — SSM Interface Endpoints
+  # Shared by ssm, ssmmessages, and ec2messages endpoints.
+  # ----------------------------------------------------------
+  SsmEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTPS to SSM Interface Endpoints from VPC and VPN clients
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCidr
+          Description: HTTPS from VPC resources
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref ClientVpnCidr
+          Description: HTTPS from VPN clients
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: '0.0.0.0/0'
+          Description: Allow all outbound
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-ssm-endpoint-sg'
+
+  # ----------------------------------------------------------
+  # SSM Interface Endpoint
+  # Required for Session Manager connectivity.
+  # ----------------------------------------------------------
+  SsmEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
+      VpcId: !Ref VPC
+      SubnetIds:
+        - !Ref PrivateSubnet
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref SsmEndpointSecurityGroup
+      PrivateDnsEnabled: true
+
+  # ----------------------------------------------------------
+  # SSM Messages Interface Endpoint
+  # Required for Session Manager connectivity.
+  # ----------------------------------------------------------
+  SsmMessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssmmessages'
+      VpcId: !Ref VPC
+      SubnetIds:
+        - !Ref PrivateSubnet
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref SsmEndpointSecurityGroup
+      PrivateDnsEnabled: true
+
+  # ----------------------------------------------------------
+  # EC2 Messages Interface Endpoint
+  # Required for Session Manager connectivity.
+  # ----------------------------------------------------------
+  Ec2MessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ec2messages'
+      VpcId: !Ref VPC
+      SubnetIds:
+        - !Ref PrivateSubnet
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref SsmEndpointSecurityGroup
+      PrivateDnsEnabled: true
+
+  # ----------------------------------------------------------
+  # IAM Role — Jumpbox EC2 instance
+  # Grants SSM Session Manager access and full admin capability.
+  # ----------------------------------------------------------
+  JumpboxRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-jumpbox-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AdministratorAccess
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-jumpbox-role'
+
+  # ----------------------------------------------------------
+  # Instance Profile — wraps the Jumpbox IAM Role
+  # ----------------------------------------------------------
+  JumpboxInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${AWS::StackName}-jumpbox-profile'
+      Roles:
+        - !Ref JumpboxRole
+
+  # ----------------------------------------------------------
+  # Security Group — Jumpbox EC2 instance
+  # No inbound rules needed; SSM Session Manager uses outbound
+  # HTTPS to the SSM endpoints above.
+  # ----------------------------------------------------------
+  JumpboxSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Jumpbox EC2 instance - outbound-only (Session Manager via SSM endpoints)
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: '0.0.0.0/0'
+          Description: Allow all outbound
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-jumpbox-sg'
+
+  # ----------------------------------------------------------
+  # Jumpbox EC2 Instance (t2.micro, Amazon Linux 2023)
+  # Access via Systems Manager Session Manager only.
+  # AMI resolved from SSM public parameter store at deploy time.
+  # ----------------------------------------------------------
+  JumpboxInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+      SubnetId: !Ref PrivateSubnet
+      IamInstanceProfile: !Ref JumpboxInstanceProfile
+      SecurityGroupIds:
+        - !Ref JumpboxSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-jumpbox'
+
+  # ----------------------------------------------------------
   # Security Group — Client VPN Endpoint
   # ----------------------------------------------------------
   ClientVpnSecurityGroup:
@@ -418,3 +608,15 @@ Outputs:
     Value: !Ref S3InterfaceEndpoint
     Export:
       Name: !Sub '${AWS::StackName}-S3InterfaceEndpointId'
+
+  AppSyncInterfaceEndpointId:
+    Description: AppSync Interface Endpoint ID (PrivateLink)
+    Value: !Ref AppSyncInterfaceEndpoint
+    Export:
+      Name: !Sub '${AWS::StackName}-AppSyncInterfaceEndpointId'
+
+  JumpboxInstanceId:
+    Description: Jumpbox EC2 Instance ID (access via SSM Session Manager)
+    Value: !Ref JumpboxInstance
+    Export:
+      Name: !Sub '${AWS::StackName}-JumpboxInstanceId'
