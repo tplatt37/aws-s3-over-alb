@@ -216,3 +216,10 @@ It doesn't have to be running on EC2s - a Fargate service running under ECS woul
 NOTE: I believe the GraphQL part will work fine with just a MODIFIED Host header, but the Realtime API (WebSocket) MUST have the x-appsync-domain header.   
 
 See the details of the LaunchTemplate in the appsync-alb.yaml file to see how NGINX needs to be configured.
+
+To test this one, modify test-appsync-over-alb.sh with your custom domain, then run:
+```
+./test-appsync-over-alb.sh YourAppSyncAPIKeyHere
+```
+
+You should see valid JSON output.
