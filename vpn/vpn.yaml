@@ -563,6 +563,8 @@ Resources:
       SecurityGroupIds:
         - !Ref ClientVpnSecurityGroup
       VpcId: !Ref VPC
+      # You probably want SplitTunnel enabled, so that Internet requests don't get routed through AWS VPN
+      # That would result in additional Data Transfer Out fees
       SplitTunnel: true
       TransportProtocol: udp
       VpnPort: 443

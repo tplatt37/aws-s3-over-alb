@@ -13,6 +13,9 @@ We'll also setup a Client VPN connection, so we can demonstrate accessing these 
 
 NOTE: We're going to use a Public Hosted Zone in Route 53 for the records.  This is NOT a best practice as it exposes internal IPs via name resolution over the Internet.  I'm doing this because I only maintain one hosted zone in my AWS account - and it is public.  For a real-world use case you would use a Private Hosted Zone in Route 53, which would leave the DNS names of the ALBs resolvable only internally.
 
+The basic idea is shown in this diagram. Please note the ALB(s) are internal - meaning they are NOT Internet facing.  
+![VPC with AWS Client VPN access](docs/VPC%20with%20AWS%20Client%20VPN.drawio.png)
+
 ## AWS Client VPN Setup
 
 First, we'll setup a VPC with public and private subnets, and an AWS Client VPN connection.
