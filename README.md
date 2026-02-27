@@ -1,28 +1,29 @@
-# S3 Over ALB
+# Making Internet-Facing Web Services Private Only
 
-A simple test implementation of accessing S3 bucket via an ALB with a custom domain name.
+This is a demonstration of making Internet-Facing Web Services Private Only.
 
-This uses the new Header Rewrite ability of an ALB to replace the Host header with the proper information required by the AWS S3 service.
+Examples include:
+* S3 Bucket 
+* Private API Gateway REST API 
+* Private AppSync API
 
+All are placed behind an Internal (non-Internet-Facing) Application Load Balancer (ALB)
 
-# API Gateway Private REST API over ALB
+We'll also setup a Client VPN connection, so we can demonstrate accessing these things over a VPN connection (using the internal IPs/DNS Names of the ALBs)
 
-There's also an example for this too.  
+NOTE: We're going to use a Public Hosted Zone in Route 53 for the records.  This is NOT a best practice as it exposes internal IPs via name resolution over the Internet.  I'm doing this because I only maintain one hosted zone in my AWS account - and it is public.  For a real-world use case you would use a Private Hosted Zone in Route 53, which would leave the DNS names of the ALBs resolvable only internally.
 
-It's real similar to the S3 solution and leverages the HostHeader rewrite capability
+## AWS Client VPN Setup
 
-# AWS Client VPN Setup
-
-You can also set the ALB to be Scheme: internal (not internet-facing) and then setup AWS Client VPN. 
+First, we'll setup a VPC with public and private subnets, and an AWS Client VPN connection.
 
 Relevant files are in the vpn folder.
 
-You would setup VPN first, then setup one of the other two stacks in that VPC (NOTE: An ALB Must have two subnets)
-
-1. Use the easy-rsa.sh to create certificates and import into ACM
-2. create the VPN stack
-3. Perform the after-stack-config.sh
-4. Create the other stack (S3 or API Gateway) - make sure the ALB is defined as scheme: internal 
+1. Using CloudShell, run the easy-rsa.sh to create VPN Server and Client certificates and import into ACM
+2. Create the VPN stack.  Name it "myvpn"
+3. Using CloudShell, run the after-stack-config.sh
+4. Download or otherwise copy the client-config.ovpn file and add a Profile in the AWS VPN Client
+4. Create the other stack(s) (S3, API Gateway, AppSync, AppSync ALB )
 
 Note that there will be a PUBLIC DNS record with a PRIVATE 10.* IP for the ALB.  This is convenient for this TECH DEMO, not a best practice for production.
 
@@ -40,6 +41,21 @@ NOTE: Health checks seem to fail with a 403.  Probably because the Host Header i
 2. Delete the VPN stack
 3. Manually delete the ACM certs that were imported during VPN setup.
 4. OPTIONAL: Delete the certificate files created for VPN 
+
+
+# S3 Over ALB
+
+A simple test implementation of accessing S3 bucket via an ALB with a custom domain name.
+
+This uses the new Header Rewrite ability of an ALB to replace the Host header with the proper information required by the AWS S3 service.
+
+
+# API Gateway Private REST API over ALB
+
+There's also an example for this too.  
+
+It's real similar to the S3 solution and leverages the HostHeader rewrite capability
+
 
 # AppSync Private API
 

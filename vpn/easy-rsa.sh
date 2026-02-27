@@ -1,3 +1,10 @@
+#!/bin/bash
+
+# Run this somewhere (CloudShell is convenient!)
+# To generate certificates needed for the VPN.
+# These will be imported into ACM
+# There's no cost for these
+
 # Clone easy-rsa
 git clone https://github.com/OpenVPN/easy-rsa.git
 cd easy-rsa/easyrsa3

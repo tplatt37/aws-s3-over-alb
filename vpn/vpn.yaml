@@ -2,9 +2,11 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
   VPC with two public subnets, two private subnets, an AWS Client VPN
   endpoint targeting both private subnets, a free S3 Gateway Endpoint,
-  and an S3 Interface Endpoint (PrivateLink) for VPN client S3 access.
+  and and Interface Endpoints (PrivateLink) for: S3, API Gateway, and AppSync.
+  Additionally for convenience, there are Interface Endpoints for CloudFormation and SSM.
   NOTE: The private subnets do not have Internet access as there is no NAT Gateway
-  (Simply to minimize cost)
+  There is also an EC2 Jumpbox (WITH ADMIN ACCESS!) in the private subnet - 
+  connect using SSM Session Manager
 
 # ============================================================
 # Parameters
@@ -310,6 +312,8 @@ Resources:
         - !Ref PrivateSubnet2
       SecurityGroupIds:
         - !Ref AppSyncEndpointSecurityGroup
+      # IMPORTANT!
+      # We want to be able to resolve the domain name of the graphql endpoint to the internal IP.
       PrivateDnsEnabled: true
 
   # ----------------------------------------------------------
@@ -545,7 +549,7 @@ Resources:
   ClientVpnEndpoint:
     Type: AWS::EC2::ClientVpnEndpoint
     Properties:
-      Description: !Sub '${AWS::StackName} – private subnet access'
+      Description: !Sub '${AWS::StackName} - private subnet access'
       ClientCidrBlock: !Ref ClientVpnCidr
       ServerCertificateArn: !Ref ServerCertificateArn
       AuthenticationOptions:

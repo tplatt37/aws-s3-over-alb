@@ -1,19 +1,20 @@
 #!/bin/bash
 
+# After the VPN stack is setup, run this to generate the .ovpn VPN Client configuration file
 
 #
 # NOTE: Some of these require customization!
 #
 #
 
-aws cloudformation describe-stacks \
-  --stack-name YOUR_STACK_NAME \
+ENDPOINTID=$(aws cloudformation describe-stacks \
+  --stack-name myvpn \
   --query "Stacks[0].Outputs[?OutputKey=='ClientVpnEndpointId'].OutputValue" \
-  --output text
-
+  --output text)
+echo "ENDPOINTID=$ENDPOINTID"
 
 aws ec2 export-client-vpn-client-configuration \
-  --client-vpn-endpoint-id cvpn-endpoint-XXXXXXXXXXXXXXXXX \
+  --client-vpn-endpoint-id $ENDPOINTID \
   --output text > client-config.ovpn
 
 

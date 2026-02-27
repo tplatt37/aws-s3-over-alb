@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  S3 bucket accessible via an internet-facing ALB with custom domain,
+  S3 bucket accessible via an internal ALB with custom domain,
   routing through S3 Interface VPC Endpoints. Includes ACM certificate,
   Route 53 DNS, host header rewrite, and a minimal Lambda custom resource
   to resolve VPC endpoint ENI private IPs for ALB target registration.
@@ -63,16 +63,20 @@ Resources:
         Version: '2012-10-17'
         Statement:
           # Deny any request not over HTTPS
-          # - Sid: DenyNonHttps
-          #   Effect: Deny
-          #   Principal: '*'
-          #   Action: 's3:*'
-          #   Resource:
-          #     - !Sub 'arn:aws:s3:::${S3Bucket}'
-          #     - !Sub 'arn:aws:s3:::${S3Bucket}/*'
-          #   Condition:
-          #     Bool:
-          #       aws:SecureTransport: 'false'
+          - Sid: DenyNonHttps
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+             - !Sub 'arn:aws:s3:::${S3Bucket}'
+             - !Sub 'arn:aws:s3:::${S3Bucket}/*'
+            Condition:
+             Bool:
+               aws:SecureTransport: 'false'
+          # Have left this commented out because it makes it hard to work 
+          # with the bucket otherwise
+          # Understand though without this your bucket is still accessible
+          # over the internet
           # Deny any request not from the VPC Endpoint
           # - Sid: DenyNonVpcEndpoint
           #   Effect: Deny
@@ -84,7 +88,8 @@ Resources:
           #   Condition:
           #     StringNotEquals:
           #       aws:sourceVpce: !Ref S3InterfaceEndpoint
-          # # Allow access from the VPC Endpoint
+          # 
+          # Allow access from the VPC Endpoint
           - Sid: AllowVpcEndpoint
             Effect: Allow
             Principal: '*'
@@ -219,13 +224,13 @@ Resources:
           HostedZoneId: !Ref HostedZoneId
 
   # -------------------------------------------------------------------------
-  # Application Load Balancer (Internet-Facing)
+  # Application Load Balancer
   # -------------------------------------------------------------------------
   ApplicationLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
       Name: !Sub '${AWS::StackName}-alb'
-      Scheme: internet-facing
+      Scheme: internal  # OR internet-facing
       Type: application
       Subnets:
         - !Ref SubnetId1
@@ -299,8 +304,9 @@ Resources:
         - Type: host-header-rewrite
           HostHeaderRewriteConfig:
             Rewrites:
+              # IMPORTANT!
               # Replace the Host header with that of the bucket so 
-              # S3 servie knows which bucket we are dealing with
+              # S3 service knows which bucket we are dealing with
               - Regex: "^(.*)$"
                 Replace: !Sub "${S3Bucket}.s3.${AWS::Region}.amazonaws.com"
 
