@@ -309,7 +309,7 @@ Resources:
 
                     # CRITICAL: route to the correct Private API
                     proxy_set_header Host             ${AppSyncDomainName};
-                    proxy_set_header x-appsync-domain ${AppSyncDomainName};
+                    proxy_set_header X-AppSync-Domain ${AppSyncDomainName};
 
                     # Pass through all client headers (x-api-key, Authorization, etc.)
                     proxy_pass_request_headers on;
