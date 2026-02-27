@@ -212,3 +212,7 @@ Important Note:
 To use the realtime API (WebSocket) with a Private API and custom domain name you must inject (add, not modify) the x-appsync-domain header.   That's why we need NGINX sitting between the ALB and the AppSync service.   If you don't have this you'll see an error message about being unable to locate the private API.
 
 It doesn't have to be running on EC2s - a Fargate service running under ECS would work great too.
+
+NOTE: I believe the GraphQL part will work fine with just a MODIFIED Host header, but the Realtime API (WebSocket) MUST have the x-appsync-domain header.   
+
+See the details of the LaunchTemplate in the appsync-alb.yaml file to see how NGINX needs to be configured.
