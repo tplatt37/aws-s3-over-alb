@@ -291,7 +291,7 @@ Resources:
       HealthCheckPort: '443'
       HealthCheckPath: /prod/healthcheck
       Matcher:
-        HttpCode: '200'
+        HttpCode: '200,403' # A 403 is OK, it means we reached the service 
       TargetGroupAttributes:
         - Key: stickiness.enabled
           Value: 'false'
