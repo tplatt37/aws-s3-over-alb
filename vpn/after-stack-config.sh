@@ -20,12 +20,12 @@ aws ec2 export-client-vpn-client-configuration \
 
 # Append the client certificate
 echo "<cert>" >> client-config.ovpn
-cat ~/easy-rsa/easyrsa3/pki/issued/client.vpn.example.com.crt >> client-config.ovpn
+cat ./easy-rsa/easyrsa3/pki/issued/client.vpn.example.com.crt >> client-config.ovpn
 echo "</cert>" >> client-config.ovpn
 
 # Append the client private key
 echo "<key>" >> client-config.ovpn
-cat ~/easy-rsa/easyrsa3/pki/private/client.vpn.example.com.key >> client-config.ovpn
+cat ./easy-rsa/easyrsa3/pki/private/client.vpn.example.com.key >> client-config.ovpn
 echo "</key>" >> client-config.ovpn
 
 

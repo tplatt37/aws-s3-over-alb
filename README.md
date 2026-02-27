@@ -16,15 +16,29 @@ NOTE: We're going to use a Public Hosted Zone in Route 53 for the records.  This
 The basic idea is shown in this diagram. Please note the ALB(s) are internal - meaning they are NOT Internet facing.  
 ![VPC with AWS Client VPN access](docs/VPC%20with%20AWS%20Client%20VPN.drawio.png)
 
+NOTE: The above is a simplification of how the ALB actually connects , see the additional diagrams below for further details.
+
+## Pre-Requisites
+
+* Route 53 Hosted Zone (Public)
+
 ## AWS Client VPN Setup
 
 First, we'll setup a VPC with public and private subnets, and an AWS Client VPN connection.
 
 Relevant files are in the vpn folder.
 
-1. Using CloudShell, run the easy-rsa.sh to create VPN Server and Client certificates and import into ACM
+1. Using CloudShell, clone this git repo
+2. Run the easy-rsa.sh to create VPN Server and Client certificates and import into ACM
+```
+cd vpn
+./easy-rsa.sh
+```
 2. Create the VPN stack.  Name it "myvpn"
-3. Using CloudShell, run the after-stack-config.sh
+3. Using CloudShell, run the after-stack-config.sh (cd into vpn folder)
+```
+./after-stack-config.sh
+```
 4. Download or otherwise copy the client-config.ovpn file and add a Profile in the AWS VPN Client
 4. Create the other stack(s) (S3, API Gateway, AppSync, AppSync ALB )
 
@@ -52,21 +66,50 @@ A simple test implementation of accessing S3 bucket via an ALB with a custom dom
 
 This uses the new Header Rewrite ability of an ALB to replace the Host header with the proper information required by the AWS S3 service.
 
+The ALB will have a Target Group populated with the Interface Endpoints for the S3 service, as shown in this diagram:
+![Access to S3 via ALB](docs/S3%20via%20AWS%20Client%20VPN.drawio.png)
+
+Create the stack using the s3-over-alb.yaml file.
+
+How can you test this?   
+1. Upload an object into the S3 bucket
+2. Create a GET Pre-Signed URL (via "Open" button in the console, for example) and replace the FQDN with your custom bucket name.   
+3. Try accessing the modified Pre-Signed URL while connected to VPN, it should work.  When NOT connected to VPN it won't work
+
+
+NOTE: The Bucket Policy is not currently limiting access via VPCE only. This is for convenience.  It's easy to lock yourself out of the bucket.
+
 
 # API Gateway Private REST API over ALB
 
 There's also an example for this too.  
 
-It's real similar to the S3 solution and leverages the HostHeader rewrite capability
+It's real similar to the S3 solution and leverages the HostHeader rewrite capability.
 
+Simply create the stack using apigw-over-alb.yaml
+
+... and then curl (while connected to VPN, of course) :
+```
+curl https://yourcustomdomainname.com/prod/data
+```
+or
+```
+curl https://yourcustomdomainname.com/prod/healthcheck
+```
+
+Similar to S3, the ALB's Target Groups have the IPs of the ENIs associated with the Interface Endpoints for the API Gateway service:
+![API GW over ALB](docs/API%20GW%20via%20AWS%20Client%20VPN.drawio.png)
 
 # AppSync Private API
+
+The AppSync example is split up into two stacks.
+
+First, use appsync-private.yaml to create the PRIVATE AppSync API.  It's a simple setup using a DynamoDB table.
 
 The AppSync template will create a PRIVATE API.  You'll need an AppSync Interface Endpoint to get to it - which is created by the VPN template.
 
 You can use the EC2 Jumpbox in the VPN stack to test it (You cannot use the console query feature because it is a PRIVATE API):
 
-NOTE: The EC2 Jumpbox doesn't have access to CloudFormation service, you'll have to run this elsewhere and manually set the environment variables.
 ```
 STACK_NAME="appsync-private-api-stack"
 
@@ -152,5 +195,20 @@ curl -s -X POST "$GRAPHQL_ENDPOINT" \
   }' | python3 -m json.tool
 ```
 
+After you have confirmed the AppSync Private API is working:
+
+Create the appsync-alb.yaml stack to create the ALB sitting in front 
+
+NOTE: This setup will be different.  The Target Group will be an Auto Scaling Group (ASG) of EC2 instances running Nginx.  
+
+This is needed because while ALB can now MODIFY existing Headers (like HOST) it cannot inject headers.  Any use of WebSocket (realtime API endpoint) will require the x-appsync-domain header.
 
 
+The setup looks like:
+
+![AppSync via ALB](docs/AppSync%20via%20AWS%20Client%20VPN.drawio.png)
+
+Important Note:
+To use the realtime API (WebSocket) with a Private API and custom domain name you must inject (add, not modify) the x-appsync-domain header.   That's why we need NGINX sitting between the ALB and the AppSync service.   If you don't have this you'll see an error message about being unable to locate the private API.
+
+It doesn't have to be running on EC2s - a Fargate service running under ECS would work great too.

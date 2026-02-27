@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  Private API Gateway REST API accessible via an internet-facing ALB with
+  Private API Gateway REST API accessible via an internal ALB with
   custom domain, routing through API Gateway Interface VPC Endpoints.
   Includes ACM certificate, Route 53 DNS, host header rewrite, and a
   minimal Lambda custom resource to resolve VPC endpoint ENI private IPs
