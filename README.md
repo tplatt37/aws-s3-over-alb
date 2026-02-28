@@ -206,7 +206,7 @@ This is needed because while ALB can now MODIFY existing Headers (like HOST) it 
 
 The setup looks like:
 
-![AppSync via ALB](docs/AppSync%20via%20AWS%20Client%20VPN.drawio.png)
+![AppSync via ALB](docs/AppSync%20via%20AWS%20Client%20VPN.drawio.svg)
 
 Important Note:
 To use the realtime API (WebSocket) with a Private API and custom domain name you must inject (add, not modify) the x-appsync-domain header.   That's why we need NGINX sitting between the ALB and the AppSync service.   If you don't have this you'll see an error message about being unable to locate the private API.
