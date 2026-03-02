@@ -259,5 +259,5 @@ mutation CreateItem {
     createdAt
   }
 }
-'''
+```
 5. The JS program should output each item as it is created.
