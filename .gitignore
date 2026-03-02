@@ -2,3 +2,5 @@
 client-config.ovpn
 local-test.sh
 *.drawio.bkp
+node_modules
+.env

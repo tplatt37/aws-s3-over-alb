@@ -223,3 +223,41 @@ To test this one, modify test-appsync-over-alb.sh with your custom domain, then 
 ```
 
 You should see valid JSON output.
+
+## Testing Web Socket
+
+
+The realtime endpoint (WebSocket) should work as well.
+
+To test:
+
+1. Populate an .env:
+```
+APPSYNC_API_ID=(the part from the URL!)
+APPSYNC_REGION=us-east-1
+APPSYNC_API_KEY=(your API key)
+```
+2. install pre-reqs
+```
+npm install
+```
+3. Run ws-client.js
+```
+node ws-client.js
+```
+4. Submit a mutation (Using console if GLOBAL , or using CURL commands if Private)
+```
+mutation CreateItem {
+  createItem(input: {
+    id: "item-001",
+    name: "My First Item",
+    description: "This is a test item"
+  }) {
+    id
+    name
+    description
+    createdAt
+  }
+}
+'''
+5. The JS program should output each item as it is created.

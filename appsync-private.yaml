@@ -75,7 +75,7 @@ Resources:
     Properties:
       Name: !Sub '${APIName}-${Environment}'
       AuthenticationType: API_KEY
-      Visibility: PRIVATE
+      Visibility: GLOBAL # PRIVATE
       LogConfig:
         CloudWatchLogsRoleArn: !GetAtt AppSyncLogsRole.Arn
         FieldLogLevel: ERROR
@@ -148,9 +148,19 @@ Resources:
           deleteItem(id: ID!): Item
         }
 
+        type Subscription {
+          onCreateItem: Item
+            @aws_subscribe(mutations: ["createItem"])
+          onUpdateItem: Item
+            @aws_subscribe(mutations: ["updateItem"])
+          onDeleteItem: Item
+            @aws_subscribe(mutations: ["deleteItem"])
+        }
+
         schema {
           query: Query
           mutation: Mutation
+          subscription: Subscription
         }
 
   #-------------------------------------------------------
