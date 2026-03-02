@@ -75,7 +75,7 @@ Resources:
     Properties:
       Name: !Sub '${APIName}-${Environment}'
       AuthenticationType: API_KEY
-      Visibility: GLOBAL # PRIVATE
+      Visibility: PRIVATE # GLOBAL 
       LogConfig:
         CloudWatchLogsRoleArn: !GetAtt AppSyncLogsRole.Arn
         FieldLogLevel: ERROR
