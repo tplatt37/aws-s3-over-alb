@@ -40,6 +40,17 @@ Parameters:
       Must be a valid AppSync domain
       (e.g., abcdef1234.appsync-api.us-east-1.amazonaws.com)
 
+  AppSyncRealTimeDomainName:
+    Type: String
+    Description: >-
+      Full domain name of the AppSync Private API Realtime (WebSocket) endpoint
+      (e.g., abcdef1234.appsync-realtime-api.us-east-1.amazonaws.com)
+    MinLength: 1
+    AllowedPattern: '^[a-z0-9]+\.appsync-realtime-api\.[a-z0-9-]+\.amazonaws\.com$'
+    ConstraintDescription: >-
+      Must be a valid AppSync Real Time (WebSocket) domain
+      (e.g., abcdef1234.appsync-realtime-api.us-east-1.amazonaws.com)
+
   ExistingCertificateArn:
     Type: String
     Default: ''
@@ -177,6 +188,11 @@ Resources:
           ToPort: 80
           SourceSecurityGroupId: !Ref ALBSecurityGroup
           Description: HTTP from ALB
+        - IpProtocol: tcp
+          FromPort: 443 
+          ToPort: 443
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: HTTPS from ALB
       SecurityGroupEgress:
         - IpProtocol: tcp
           FromPort: 443
@@ -259,11 +275,20 @@ Resources:
             # ---- Install NGINX ----
             dnf install -y nginx
 
+            # ---- Generate self-signed TLS certificate ----
+            mkdir -p /etc/nginx/ssl
+            openssl req -x509 -nodes -days 3650 \
+              -newkey rsa:2048 \
+              -keyout /etc/nginx/ssl/selfsigned.key \
+              -out    /etc/nginx/ssl/selfsigned.crt \
+              -subj   "/CN=nginx-proxy/O=internal"
+            chmod 600 /etc/nginx/ssl/selfsigned.key
+
             # ---- Write main nginx.conf ----
             cat > /etc/nginx/nginx.conf << 'NGINXMAIN'
             user nginx;
             worker_processes auto;
-            error_log /var/log/nginx/error.log notice;
+            error_log /var/log/nginx/error.log debug;
             pid /run/nginx.pid;
 
             events {
@@ -274,8 +299,14 @@ Resources:
                 underscores_in_headers on;
 
                 log_format main '$remote_addr - $remote_user [$time_local] "$request" '
-                                '$status $body_bytes_sent "$http_referer" '
-                                '"$http_user_agent"';
+                                'status=$status bytes=$body_bytes_sent '
+                                'referer="$http_referer" ua="$http_user_agent" '
+                                'request_uri="$request_uri" args="$args" '
+                                'upstream_addr="$upstream_addr" upstream_status="$upstream_status" '
+                                'upstream_response_time="$upstream_response_time" '
+                                'upstream_connect_time="$upstream_connect_time" '
+                                'upstream_url="$upstream_url" '
+                                'ssl="$ssl_protocol/$ssl_cipher"';
                 access_log  /var/log/nginx/access.log main;
                 sendfile        on;
                 tcp_nopush      on;
@@ -290,8 +321,13 @@ Resources:
             # ---- Write AppSync reverse-proxy virtual host ----
             cat > /etc/nginx/conf.d/appsync-proxy.conf << PROXYCONF
             server {
-                listen 80;
+                listen 443 ssl;
                 server_name _;
+
+                ssl_certificate     /etc/nginx/ssl/selfsigned.crt;
+                ssl_certificate_key /etc/nginx/ssl/selfsigned.key;
+                ssl_protocols       TLSv1.2 TLSv1.3;
+                ssl_ciphers         HIGH:!aNULL:!MD5;
 
                 resolver 169.254.169.253 valid=30s ipv6=off;
 
@@ -303,13 +339,41 @@ Resources:
                 }
 
                 # ---------- Proxy to AppSync Private API ----------
-                location / {
+                location /graphql {
+                    set \$upstream_url "https://${AppSyncDomainName}\$request_uri";
+                    access_log /var/log/nginx/access.log main;
+
                     proxy_pass https://${AppSyncDomainName};
                     proxy_ssl_server_name on;
 
                     # CRITICAL: route to the correct Private API
                     proxy_set_header Host             ${AppSyncDomainName};
                     proxy_set_header X-AppSync-Domain ${AppSyncDomainName};
+
+                    # Pass through all client headers (x-api-key, Authorization, etc.)
+                    proxy_pass_request_headers on;
+
+                    # Standard forwarding headers
+                    proxy_set_header X-Real-IP        \$remote_addr;
+                    proxy_set_header X-Forwarded-For  \$proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto https;
+
+                    # Timeouts
+                    proxy_connect_timeout  10s;
+                    proxy_read_timeout     30s;
+                    proxy_send_timeout     30s;
+                }
+
+                location /graphql/realtime {
+                    set \$upstream_url "https://${AppSyncRealTimeDomainName}\$request_uri";
+                    access_log /var/log/nginx/access.log main;
+
+                    proxy_pass https://${AppSyncRealTimeDomainName};
+                    proxy_ssl_server_name on;
+
+                    # CRITICAL: route to the correct Private API
+                    proxy_set_header Host             ${AppSyncRealTimeDomainName};
+                    proxy_set_header X-AppSync-Domain ${AppSyncRealTimeDomainName};
 
                     # Pass through all client headers (x-api-key, Authorization, etc.)
                     proxy_pass_request_headers on;
@@ -348,13 +412,13 @@ Resources:
   NginxTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      Protocol: HTTP
-      Port: 80
+      Protocol: HTTPS
+      Port: 443 
       VpcId: !Ref VpcId
       TargetType: instance
       HealthCheckEnabled: true
-      HealthCheckProtocol: HTTP
-      HealthCheckPort: '80'
+      HealthCheckProtocol: HTTPS
+      HealthCheckPort: '443'
       HealthCheckPath: /health
       HealthCheckIntervalSeconds: 30
       HealthCheckTimeoutSeconds: 5

@@ -3,17 +3,28 @@ const WebSocket = require("ws");
 const { v4: uuidv4 } = require("uuid");
 
 // ─── Configuration from environment variables ───────────────────
-const API_ID  = process.env.APPSYNC_API_ID;
+const API_URL  = process.env.APPSYNC_API_URL;
 const REGION  = process.env.APPSYNC_REGION;
 const API_KEY = process.env.APPSYNC_API_KEY;
 
-if (!API_ID || !REGION || !API_KEY) {
-  console.error("Missing required environment variables: APPSYNC_API_ID, APPSYNC_REGION, APPSYNC_API_KEY");
+if (!API_URL || !REGION || !API_KEY) {
+  console.error("Missing required environment variables: APPSYNC_API_URL, APPSYNC_REGION, APPSYNC_API_KEY");
   process.exit(1);
 }
 
-const HOST    = `${API_ID}.appsync-api.${REGION}.amazonaws.com`;
-const WSS_URL = `wss://${API_ID}.appsync-realtime-api.${REGION}.amazonaws.com/graphql`;
+console.log(API_URL);
+console.log(REGION);
+console.log(API_KEY);
+
+const HOST    = `${API_URL}`;     
+//`${API_ID}.appsync-api.${REGION}.amazonaws.com`;
+
+// /ws gives a 404
+// /graphql/ws gives a 400
+const WSS_URL = `wss://${API_URL}/graphql`;
+
+console.log(HOST);
+console.log(WSS_URL);
 
 const SUBSCRIPTION_QUERY = `
   subscription OnCreateItem {
@@ -25,13 +36,23 @@ const SUBSCRIPTION_QUERY = `
   }
 `;
 
+// Private API does not allow normal Headers.  You have to pass via QueryString or use Sec-WebSocket-Protocol
+// See here: https://docs.aws.amazon.com/appsync/latest/devguide/real-time-websocket-client.html#handshake-details-to-establish-the-websocket-connection
+
 // ─── Step 1: Build the connection URL ───────────────────────────
+const amzDate = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+// Output: "20260302T143025Z"
+console.log(amzDate);
+
 const headerB64  = Buffer.from(JSON.stringify({
-  host: HOST,
-  "x-api-key": API_KEY,
+  "host": "xxxxxxxxxxxxxxxxx.appsync-api.us-east-1.amazonaws.com",
+  "x-api-key": API_KEY
+  //"x-amz-date": amzDate
 })).toString("base64");
 
+// Empty Payload as per: https://docs.aws.amazon.com/appsync/latest/devguide/real-time-websocket-client.html
 const payloadB64 = Buffer.from(JSON.stringify({})).toString("base64");
+console.log(payloadB64)
 
 const connectionUrl = `${WSS_URL}?header=${headerB64}&payload=${payloadB64}`;
 

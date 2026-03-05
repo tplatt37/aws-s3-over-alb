@@ -2,9 +2,9 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
   VPC with two public subnets, two private subnets, an AWS Client VPN
   endpoint targeting both private subnets, a free S3 Gateway Endpoint,
-  and and Interface Endpoints (PrivateLink) for: S3, API Gateway, and AppSync.
+  and Interface Endpoints (PrivateLink) for: S3, API Gateway, and AppSync.
   Additionally for convenience, there are Interface Endpoints for CloudFormation and SSM.
-  NOTE: The private subnets do not have Internet access as there is no NAT Gateway
+  A NAT Gateway in the first public subnet provides Internet access for the private subnets.
   There is also an EC2 Jumpbox (WITH ADMIN ACCESS!) in the private subnet - 
   connect using SSM Session Manager
 
@@ -149,8 +149,28 @@ Resources:
       RouteTableId: !Ref PublicRouteTable
 
   # ----------------------------------------------------------
+  # NAT Gateway — provides Internet access for private subnets
+  # ----------------------------------------------------------
+  NatGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-nat-eip'
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-nat-gw'
+
+  # ----------------------------------------------------------
   # Private Subnet + Route Table
-  # No default route — no NAT Gateway.
   # ----------------------------------------------------------
   PrivateSubnet:
     Type: AWS::EC2::Subnet
@@ -171,6 +191,13 @@ Resources:
         - Key: Name
           Value: !Sub '${AWS::StackName}-private-rt'
 
+  PrivateDefaultRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      NatGatewayId: !Ref NatGateway
+
   PrivateSubnetRouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
@@ -180,7 +207,6 @@ Resources:
   # ----------------------------------------------------------
   # Second Private Subnet + Route Table (required for ALB)
   # Placed in a different AZ from the first private subnet.
-  # No default route — no NAT Gateway.
   # ----------------------------------------------------------
   PrivateSubnet2:
     Type: AWS::EC2::Subnet
@@ -200,6 +226,13 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-private-rt-2'
+
+  PrivateDefaultRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: '0.0.0.0/0'
+      NatGatewayId: !Ref NatGateway
 
   PrivateSubnet2RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
