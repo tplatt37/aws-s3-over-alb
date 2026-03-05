@@ -102,6 +102,8 @@ Similar to S3, the ALB's Target Groups have the IPs of the ENIs associated with 
 
 # AppSync Private API
 
+NOTE: AppSync supports custom domain names, but DOES NOT support Private APIs with Custom Domain Names.  To make this work, we'll put an ALB in front of a Private API - but we'll also need Nginx as the target of the ALB to ensure our one custom domain name can handle GraphQL (non-realtime) and WebSocket (realtime) requests.
+
 The AppSync example is split up into two stacks.
 
 First, use appsync/appsync-private-lambda-auth.yaml to create the PRIVATE AppSync API.  It's a simple setup using a DynamoDB table, protected with an overly simplistic Lambda Authorizer.
