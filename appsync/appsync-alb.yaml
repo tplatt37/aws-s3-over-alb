@@ -350,6 +350,44 @@ Resources:
                 # ---------- Proxy to AppSync Private API ----------
                 location /graphql {
 
+                    set \$appsync_endpoint "${AppSyncDomainName}";
+                    # For logging and debugging. 
+                    set \$upstream_url_log https://${AppSyncDomainName}\$request_uri; 
+
+                    proxy_pass https://\$appsync_endpoint\$request_uri;
+                    proxy_ssl_server_name on;
+
+                    # Set the Host header to the REAL TIME API 
+                    proxy_set_header Host             ${AppSyncDomainName};
+
+                    # DO NOT Set X-AppSync-Domain
+                    # It is not clear when specifically x-appsync-domain is needed
+                    # here, the nginx is running in the vpc and resolving the endpoint
+                    # name to the interface endpoints, so the Host header is probably sufficient
+                    # If you do set this with this specific configuration,
+                    # you'll get a 400 Invalid Query String
+                    #proxy_set_header X-AppSync-Domain ${AppSyncDomainName};
+                    # NOTE: this was determined through extensive experimentation.
+
+                    # Pass through all client headers (x-api-key, Authorization, etc.)
+                    proxy_pass_request_headers on;
+                    proxy_ssl_session_reuse off;
+                    proxy_buffering off;
+
+                    # Standard forwarding headers
+                    proxy_set_header X-Real-IP        \$remote_addr;
+                    proxy_set_header X-Forwarded-For  \$proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto https;
+
+                    # Timeouts
+                    proxy_connect_timeout  30s;
+                    proxy_read_timeout     30s;
+                    proxy_send_timeout     30s;
+                }
+
+                # ---------- Proxy to AppSync REAL TIME (WEBSOCKET) Private API ----------
+                location /graphql/realtime {
+
                     set \$appsync_endpoint "${AppSyncRealTimeDomainName}";
                     set \$upstream_url_log https://${AppSyncRealTimeDomainName}\$request_uri; 
 
@@ -372,7 +410,8 @@ Resources:
                     proxy_pass_request_headers on;
                     proxy_ssl_session_reuse off;
                     proxy_buffering off;
-
+                    
+                    # Nginx needs this to support WebSocket
                     proxy_http_version 1.1;
                     proxy_set_header Upgrade \$http_upgrade;
                     proxy_set_header Connection \$connection_upgrade;
@@ -382,7 +421,7 @@ Resources:
                     proxy_set_header X-Forwarded-For  \$proxy_add_x_forwarded_for;
                     proxy_set_header X-Forwarded-Proto https;
 
-                    # Timeouts
+                    # Timeouts long-lived for WebSocket
                     proxy_connect_timeout  30s;
                     proxy_read_timeout     86400s;
                     proxy_send_timeout     86400s;

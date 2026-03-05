@@ -5,7 +5,7 @@ This is a demonstration of making Internet-Facing Web Services Private Only.
 Examples include:
 * S3 Bucket 
 * Private API Gateway REST API 
-* Private AppSync API
+* Private AppSync API (Graphql and WebSocket/Real Time)
 
 All are placed behind an Internal (non-Internet-Facing) Application Load Balancer (ALB)
 
@@ -104,7 +104,7 @@ Similar to S3, the ALB's Target Groups have the IPs of the ENIs associated with 
 
 The AppSync example is split up into two stacks.
 
-First, use appsync-private.yaml to create the PRIVATE AppSync API.  It's a simple setup using a DynamoDB table.
+First, use appsync/appsync-private-lambda-auth.yaml to create the PRIVATE AppSync API.  It's a simple setup using a DynamoDB table, protected with an overly simplistic Lambda Authorizer.
 
 The AppSync template will create a PRIVATE API.  You'll need an AppSync Interface Endpoint to get to it - which is created by the VPN template.
 
@@ -119,21 +119,18 @@ GRAPHQL_ENDPOINT=$(aws cloudformation describe-stacks \
   --query "Stacks[0].Outputs[?OutputKey=='GraphQLEndpoint'].OutputValue" \
   --output text)
 
-# Get the API key
-API_KEY=$(aws cloudformation describe-stacks \
-  --stack-name "$STACK_NAME" \
-  --query "Stacks[0].Outputs[?OutputKey=='APIKey'].OutputValue" \
-  --output text)
+# Set the token value
+TOKEN="SET_SECRET_TOKEN_VALUE_HERE"
 
 echo "Endpoint: $GRAPHQL_ENDPOINT"
-echo "API Key:  $API_KEY"
+echo "Authorization:  $TOKEN"
 ```
 
 Create an Item (a Mutation)
 ```
 curl -s -X POST "$GRAPHQL_ENDPOINT" \
   -H "Content-Type: application/json" \
-  -H "x-api-key: $API_KEY" \
+  -H "Authorization: $TOKEN" \
   -d '{
     "query": "mutation CreateItem($input: CreateItemInput!) { createItem(input: $input) { id name description createdAt } }",
     "variables": {
@@ -150,7 +147,7 @@ Get an Item (Query)
 ```
 curl -s -X POST "$GRAPHQL_ENDPOINT" \
   -H "Content-Type: application/json" \
-  -H "x-api-key: $API_KEY" \
+  -H "Authorization: $TOKEN" \
   -d '{
     "query": "query GetItem($id: ID!) { getItem(id: $id) { id name description createdAt } }",
     "variables": { "id": "item-001" }
@@ -161,7 +158,7 @@ List all Items (Query)
 ```
 curl -s -X POST "$GRAPHQL_ENDPOINT" \
   -H "Content-Type: application/json" \
-  -H "x-api-key: $API_KEY" \
+  -H "Authorization: $TOKEN" \
   -d '{
     "query": "query { listItems { id name description createdAt } }"
   }' | python3 -m json.tool
@@ -171,7 +168,7 @@ Update an Item (Mutation)
 ```
 curl -s -X POST "$GRAPHQL_ENDPOINT" \
   -H "Content-Type: application/json" \
-  -H "x-api-key: $API_KEY" \
+  -H "Authorization: $TOKEN" \
   -d '{
     "query": "mutation UpdateItem($input: UpdateItemInput!) { updateItem(input: $input) { id name description } }",
     "variables": {
@@ -188,7 +185,7 @@ Delete an Item (Mutation)
 ```
 curl -s -X POST "$GRAPHQL_ENDPOINT" \
   -H "Content-Type: application/json" \
-  -H "x-api-key: $API_KEY" \
+  -H "Authorization: $TOKEN" \
   -d '{
     "query": "mutation DeleteItem($id: ID!) { deleteItem(id: $id) { id name } }",
     "variables": { "id": "item-001" }
@@ -201,66 +198,32 @@ Create the appsync-alb.yaml stack to create the ALB sitting in front
 
 NOTE: This setup will be different.  The Target Group will be an Auto Scaling Group (ASG) of EC2 instances running Nginx.  
 
-This is needed because while ALB can now MODIFY existing Headers (like HOST) it cannot inject headers.  Any use of WebSocket (realtime API endpoint) will require the x-appsync-domain header.
-
+This is needed because while ALB can now MODIFY existing Headers (like HOST) it cannot inject headers.  
 
 The setup looks like:
 
 ![AppSync via ALB](docs/AppSync%20via%20AWS%20Client%20VPN.drawio.svg)
 
-Important Note:
-To use the realtime API (WebSocket) with a Private API and custom domain name you must inject (add, not modify) the x-appsync-domain header.   That's why we need NGINX sitting between the ALB and the AppSync service.   If you don't have this you'll see an error message about being unable to locate the private API:
-```
-Unable to find the private GraphQL API for this domain.
-```
 
 It doesn't have to be running on EC2s - a Fargate service running under ECS would work great too.
 
-NOTE: I believe the GraphQL part will work fine with just a MODIFIED Host header, but the Realtime API (WebSocket) MUST have the x-appsync-domain header.   
-
 See the details of the LaunchTemplate in the appsync-alb.yaml file to see how NGINX needs to be configured.
 
+
 To test this one, modify test-appsync-over-alb.sh with your custom domain, then run:
+(After setting environment variables used by the script)
 ```
-./test-appsync-over-alb.sh YourAppSyncAPIKeyHere
+./curl-lambda.sh
 ```
+
 
 You should see valid JSON output.
 
 ## Testing Web Socket
 
-
 The realtime endpoint (WebSocket) should work as well.
+(After setting values)
+```
+./ws-lambda.sh
+```
 
-To test:
-
-1. Populate an .env:
-```
-APPSYNC_API_ID=(the part from the URL!)
-APPSYNC_REGION=us-east-1
-APPSYNC_API_KEY=(your API key)
-```
-2. install pre-reqs
-```
-npm install
-```
-3. Run ws-client.js
-```
-node ws-client.js
-```
-4. Submit a mutation (Using console if GLOBAL , or using CURL commands if Private)
-```
-mutation CreateItem {
-  createItem(input: {
-    id: "item-001",
-    name: "My First Item",
-    description: "This is a test item"
-  }) {
-    id
-    name
-    description
-    createdAt
-  }
-}
-```
-5. The JS program should output each item as it is created.

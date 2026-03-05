@@ -3,7 +3,6 @@ Description: >-
   VPC with two public subnets, two private subnets, an AWS Client VPN
   endpoint targeting both private subnets, a free S3 Gateway Endpoint,
   and Interface Endpoints (PrivateLink) for: S3, API Gateway, and AppSync.
-  Additionally for convenience, there are Interface Endpoints for CloudFormation and SSM.
   A NAT Gateway in the first public subnet provides Internet access for the private subnets.
   There is also an EC2 Jumpbox (WITH ADMIN ACCESS!) in the private subnet - 
   connect using SSM Session Manager
