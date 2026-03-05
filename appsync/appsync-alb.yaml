@@ -274,6 +274,10 @@ Resources:
 
             # ---- Install NGINX ----
             dnf install -y nginx
+            # to install wscat for debugging
+            dnf install -y nodejs
+            npm -g install wscat
+
 
             # ---- Generate self-signed TLS certificate ----
             mkdir -p /etc/nginx/ssl
@@ -305,7 +309,7 @@ Resources:
                                 'upstream_addr="$upstream_addr" upstream_status="$upstream_status" '
                                 'upstream_response_time="$upstream_response_time" '
                                 'upstream_connect_time="$upstream_connect_time" '
-                                'upstream_url="$upstream_url" '
+                                'upstream_url_log="$upstream_url_log" '
                                 'ssl="$ssl_protocol/$ssl_cipher"';
                 access_log  /var/log/nginx/access.log main;
                 sendfile        on;
@@ -317,9 +321,14 @@ Resources:
                 include       /etc/nginx/conf.d/*.conf;
             }
             NGINXMAIN
-
+            # If nginx will not start run: sudo nginx -t
             # ---- Write AppSync reverse-proxy virtual host ----
             cat > /etc/nginx/conf.d/appsync-proxy.conf << PROXYCONF
+            map \$http_upgrade \$connection_upgrade {
+              default upgrade;
+              ''      close;
+            }
+
             server {
                 listen 443 ssl;
                 server_name _;
@@ -340,43 +349,33 @@ Resources:
 
                 # ---------- Proxy to AppSync Private API ----------
                 location /graphql {
-                    set \$upstream_url "https://${AppSyncDomainName}\$request_uri";
-                    access_log /var/log/nginx/access.log main;
 
-                    proxy_pass https://${AppSyncDomainName};
+                    set \$appsync_endpoint "${AppSyncRealTimeDomainName}";
+                    set \$upstream_url_log https://${AppSyncRealTimeDomainName}\$request_uri; 
+
+                    proxy_pass https://\$appsync_endpoint\$request_uri;
                     proxy_ssl_server_name on;
 
-                    # CRITICAL: route to the correct Private API
-                    proxy_set_header Host             ${AppSyncDomainName};
-                    proxy_set_header X-AppSync-Domain ${AppSyncDomainName};
-
-                    # Pass through all client headers (x-api-key, Authorization, etc.)
-                    proxy_pass_request_headers on;
-
-                    # Standard forwarding headers
-                    proxy_set_header X-Real-IP        \$remote_addr;
-                    proxy_set_header X-Forwarded-For  \$proxy_add_x_forwarded_for;
-                    proxy_set_header X-Forwarded-Proto https;
-
-                    # Timeouts
-                    proxy_connect_timeout  10s;
-                    proxy_read_timeout     30s;
-                    proxy_send_timeout     30s;
-                }
-
-                location /graphql/realtime {
-                    set \$upstream_url "https://${AppSyncRealTimeDomainName}\$request_uri";
-                    access_log /var/log/nginx/access.log main;
-
-                    proxy_pass https://${AppSyncRealTimeDomainName};
-                    proxy_ssl_server_name on;
-
-                    # CRITICAL: route to the correct Private API
+                    # Set the Host header to the REAL TIME API 
                     proxy_set_header Host             ${AppSyncRealTimeDomainName};
-                    proxy_set_header X-AppSync-Domain ${AppSyncRealTimeDomainName};
+
+                    # DO NOT Set X-AppSync-Domain
+                    # It is not clear when specifically x-appsync-domain is needed
+                    # here, the nginx is running in the vpc and resolving the endpoint
+                    # name to the interface endpoints, so the Host header is probably sufficient
+                    # If you do set this with this specific configuration,
+                    # you'll get a 400 Invalid Query String
+                    #proxy_set_header X-AppSync-Domain ${AppSyncDomainName};
+                    # NOTE: this was determined through extensive experimentation.
 
                     # Pass through all client headers (x-api-key, Authorization, etc.)
                     proxy_pass_request_headers on;
+                    proxy_ssl_session_reuse off;
+                    proxy_buffering off;
+
+                    proxy_http_version 1.1;
+                    proxy_set_header Upgrade \$http_upgrade;
+                    proxy_set_header Connection \$connection_upgrade;
 
                     # Standard forwarding headers
                     proxy_set_header X-Real-IP        \$remote_addr;
@@ -384,9 +383,9 @@ Resources:
                     proxy_set_header X-Forwarded-Proto https;
 
                     # Timeouts
-                    proxy_connect_timeout  10s;
-                    proxy_read_timeout     30s;
-                    proxy_send_timeout     30s;
+                    proxy_connect_timeout  30s;
+                    proxy_read_timeout     86400s;
+                    proxy_send_timeout     86400s;
                 }
             }
             PROXYCONF
@@ -420,10 +419,10 @@ Resources:
       HealthCheckProtocol: HTTPS
       HealthCheckPort: '443'
       HealthCheckPath: /health
-      HealthCheckIntervalSeconds: 30
+      HealthCheckIntervalSeconds: 300
       HealthCheckTimeoutSeconds: 5
       HealthyThresholdCount: 2
-      UnhealthyThresholdCount: 3
+      UnhealthyThresholdCount: 10
       Matcher:
         HttpCode: '200'
       TargetGroupAttributes:

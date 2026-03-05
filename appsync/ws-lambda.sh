@@ -5,10 +5,7 @@
 # sudo dnf install nodejs
 # sudo npm -g install wscat
 
-# MUST set Environment Variables:
-# ENDPOINT
-# HOST
-# TOKEN
+# Must set these with export XXX=XXX
 echo "ENDPOINT=$ENDPOINT"
 echo "HOST=$HOST"
 echo "TOKEN=$TOKEN"
