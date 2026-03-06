@@ -1,0 +1,518 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Internal ALB that targets existing AppSync Interface VPC Endpoints directly,
+  without an NGINX proxy. Uses a Lambda custom resource to resolve VPC Endpoint
+  ENI private IPs for ALB target registration. Routes /graphql to the AppSync
+  GraphQL endpoint and /graphql/realtime to the AppSync Realtime (WebSocket)
+  endpoint. Rewrites the Host header on each path so AppSync can identify the API.
+
+# ===========================================================================
+# Parameters
+# ===========================================================================
+Parameters:
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID where the ALB and existing VPC Endpoints reside
+
+  SubnetId1:
+    Type: AWS::EC2::Subnet::Id
+    Description: First subnet for the ALB (must match a subnet used by the VPC Endpoints)
+
+  SubnetId2:
+    Type: AWS::EC2::Subnet::Id
+    Description: Second subnet for the ALB (must match a subnet used by the VPC Endpoints)
+
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Description: Route 53 hosted zone ID for DNS record creation
+
+  DomainName:
+    Type: String
+    Description: Custom domain name for the ALB (e.g., graphql.internal.example.com)
+    AllowedPattern: ^[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9]$
+
+  AppSyncVpcEndpointId:
+    Type: String
+    Description: >
+      ID of the existing AppSync (appsync-api) Interface VPC Endpoint
+      (e.g., vpce-0abc123def456789a). Its ENI private IPs will be registered
+      as targets for the /graphql target group.
+    AllowedPattern: ^vpce-[0-9a-f]+$
+    ConstraintDescription: Must be a valid VPC Endpoint ID (vpce-xxxxxxxxxxxxxxxxx)
+
+  AppSyncRealTimeVpcEndpointId:
+    Type: String
+    Description: >
+      ID of the existing AppSync Realtime (appsync-realtime-api) Interface VPC Endpoint
+      (e.g., vpce-0abc123def456789b). Its ENI private IPs will be registered
+      as targets for the /graphql/realtime target group.
+    AllowedPattern: ^vpce-[0-9a-f]+$
+    ConstraintDescription: Must be a valid VPC Endpoint ID (vpce-xxxxxxxxxxxxxxxxx)
+
+  AppSyncDomainName:
+    Type: String
+    Description: >
+      Full domain name of the AppSync GraphQL endpoint
+      (e.g., abcdef1234.appsync-api.us-east-1.amazonaws.com).
+      Used to rewrite the Host header for /graphql requests.
+    MinLength: 1
+    AllowedPattern: '^[a-z0-9]+\.appsync-api\.[a-z0-9-]+\.amazonaws\.com$'
+    ConstraintDescription: >
+      Must be a valid AppSync GraphQL domain
+      (e.g., abcdef1234.appsync-api.us-east-1.amazonaws.com)
+
+  AppSyncRealTimeDomainName:
+    Type: String
+    Description: >
+      Full domain name of the AppSync Realtime (WebSocket) endpoint
+      (e.g., abcdef1234.appsync-realtime-api.us-east-1.amazonaws.com).
+      Used to rewrite the Host header for /graphql/realtime requests.
+    MinLength: 1
+    AllowedPattern: '^[a-z0-9]+\.appsync-realtime-api\.[a-z0-9-]+\.amazonaws\.com$'
+    ConstraintDescription: >
+      Must be a valid AppSync Realtime domain
+      (e.g., abcdef1234.appsync-realtime-api.us-east-1.amazonaws.com)
+
+  ExistingCertificateArn:
+    Type: String
+    Default: ''
+    Description: >
+      (Optional) ARN of an existing ACM or Private CA certificate for the ALB HTTPS
+      listener. If left empty, a new ACM certificate is created via DNS validation
+      using the provided Hosted Zone. NOTE: ACM DNS validation requires the domain
+      to be resolvable via PUBLIC DNS. For private-only domains, supply an existing
+      certificate ARN from AWS Private CA.
+
+  AllowedCidrBlock:
+    Type: String
+    Default: 10.0.0.0/8
+    Description: >
+      CIDR block allowed to reach the ALB on port 443
+      (e.g., Client VPN CIDR or VPC CIDR)
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    ConstraintDescription: Must be a valid CIDR block (e.g. 10.0.0.0/8)
+
+# ===========================================================================
+# Metadata – Console Parameter Grouping
+# ===========================================================================
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Network Configuration
+        Parameters:
+          - VpcId
+          - SubnetId1
+          - SubnetId2
+          - AllowedCidrBlock
+      - Label:
+          default: Domain & Certificate
+        Parameters:
+          - HostedZoneId
+          - DomainName
+          - ExistingCertificateArn
+      - Label:
+          default: AppSync VPC Endpoints (must already exist)
+        Parameters:
+          - AppSyncVpcEndpointId
+          - AppSyncRealTimeVpcEndpointId
+      - Label:
+          default: AppSync Domain Names (for Host header rewrite)
+        Parameters:
+          - AppSyncDomainName
+          - AppSyncRealTimeDomainName
+    ParameterLabels:
+      VpcId:
+        default: VPC
+      SubnetId1:
+        default: Subnet 1
+      SubnetId2:
+        default: Subnet 2
+      AllowedCidrBlock:
+        default: Allowed Inbound CIDR
+      HostedZoneId:
+        default: Route 53 Hosted Zone ID
+      DomainName:
+        default: Custom Domain Name for ALB
+      ExistingCertificateArn:
+        default: Existing Certificate ARN (leave blank to create new)
+      AppSyncVpcEndpointId:
+        default: AppSync GraphQL VPC Endpoint ID
+      AppSyncRealTimeVpcEndpointId:
+        default: AppSync Realtime VPC Endpoint ID
+      AppSyncDomainName:
+        default: AppSync GraphQL Endpoint Domain Name
+      AppSyncRealTimeDomainName:
+        default: AppSync Realtime Endpoint Domain Name
+
+# ===========================================================================
+# Conditions
+# ===========================================================================
+Conditions:
+  CreateNewCertificate: !Equals [!Ref ExistingCertificateArn, '']
+
+# ===========================================================================
+# Resources
+# ===========================================================================
+Resources:
+
+  # -------------------------------------------------------------------------
+  # Security Group – ALB
+  # -------------------------------------------------------------------------
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${AWS::StackName} - Internal ALB (HTTPS inbound)'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref AllowedCidrBlock
+          Description: HTTPS from VPN / VPC clients
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-alb-sg'
+
+  # -------------------------------------------------------------------------
+  # ACM Certificate (only created when no existing ARN is supplied)
+  # -------------------------------------------------------------------------
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Condition: CreateNewCertificate
+    Properties:
+      DomainName: !Ref DomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref HostedZoneId
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-cert'
+
+  # -------------------------------------------------------------------------
+  # Lambda Custom Resource – Resolve VPC Endpoint ENIs to Private IPs
+  #
+  # Because these VPC Endpoints are pre-existing (not created by this stack),
+  # CloudFormation cannot return their NetworkInterfaceIds via GetAtt. Instead,
+  # this Lambda accepts a VpcEndpointId, calls ec2:DescribeVpcEndpoints to
+  # retrieve the ENI IDs, then resolves each ENI to its private IP address.
+  # -------------------------------------------------------------------------
+  ENIResolverRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DescribeVpceAndENIs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeVpcEndpoints
+                  - ec2:DescribeNetworkInterfaces
+                Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-eni-resolver-role'
+
+  ENIResolverFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-eni-ip-resolver'
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 30
+      Role: !GetAtt ENIResolverRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+
+          def handler(event, context):
+              try:
+                  if event['RequestType'] in ('Create', 'Update'):
+                      vpce_id = event['ResourceProperties']['VpcEndpointId']
+                      ec2 = boto3.client('ec2')
+
+                      # Step 1: Get the ENI IDs attached to the VPC Endpoint
+                      vpce_resp = ec2.describe_vpc_endpoints(VpcEndpointIds=[vpce_id])
+                      eni_ids = vpce_resp['VpcEndpoints'][0]['NetworkInterfaceIds']
+
+                      # Step 2: Resolve each ENI ID to its private IP
+                      eni_resp = ec2.describe_network_interfaces(NetworkInterfaceIds=eni_ids)
+                      ips = [eni['PrivateIpAddress'] for eni in eni_resp['NetworkInterfaces']]
+
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                          'IP1': ips[0],
+                          'IP2': ips[1] if len(ips) > 1 else ips[0],
+                          'IPs': ','.join(ips)
+                      })
+                  else:
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception as e:
+                  print(f"Error: {e}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-eni-ip-resolver'
+
+  # -------------------------------------------------------------------------
+  # Custom Resource – Resolve AppSync GraphQL VPCE ENI IPs
+  # -------------------------------------------------------------------------
+  AppSyncGraphQLENILookup:
+    Type: Custom::ENIIPLookup
+    Properties:
+      ServiceToken: !GetAtt ENIResolverFunction.Arn
+      VpcEndpointId: !Ref AppSyncVpcEndpointId
+
+  # -------------------------------------------------------------------------
+  # Custom Resource – Resolve AppSync Realtime VPCE ENI IPs
+  # -------------------------------------------------------------------------
+  AppSyncRealTimeENILookup:
+    Type: Custom::ENIIPLookup
+    Properties:
+      ServiceToken: !GetAtt ENIResolverFunction.Arn
+      VpcEndpointId: !Ref AppSyncRealTimeVpcEndpointId
+
+  # -------------------------------------------------------------------------
+  # Target Group – AppSync GraphQL (/graphql)
+  # IP-based, HTTPS to AppSync GraphQL VPCE ENIs
+  # -------------------------------------------------------------------------
+  AppSyncGraphQLTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${AWS::StackName}-gql-tg'
+      VpcId: !Ref VpcId
+      Protocol: HTTPS
+      Port: 443
+      TargetType: ip
+      HealthCheckProtocol: HTTPS
+      HealthCheckPort: '443'
+      HealthCheckPath: /graphql
+      # 200 = healthy; 400/403/404/405 = reached AppSync but request was rejected
+      # (expected for an unauthenticated health-check GET to the GraphQL endpoint)
+      # Or a 404 Private API not found - but that still means we reached appsync
+      Matcher:
+        HttpCode: '200,400,403,404,405'
+      TargetGroupAttributes:
+        - Key: stickiness.enabled
+          Value: 'false'
+      Targets:
+        - Id: !GetAtt AppSyncGraphQLENILookup.IP1
+          Port: 443
+        - Id: !GetAtt AppSyncGraphQLENILookup.IP2
+          Port: 443
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-gql-tg'
+
+  # -------------------------------------------------------------------------
+  # Target Group – AppSync Realtime (/graphql/realtime)
+  # IP-based, HTTPS to AppSync Realtime VPCE ENIs
+  # -------------------------------------------------------------------------
+  AppSyncRealTimeTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${AWS::StackName}-rt-tg'
+      VpcId: !Ref VpcId
+      Protocol: HTTPS
+      Port: 443
+      TargetType: ip
+      HealthCheckProtocol: HTTPS
+      HealthCheckPort: '443'
+      HealthCheckPath: /graphql/realtime
+      # 200 = healthy; 400/403/405 = reached AppSync (expected for HTTP health check
+      # against a WebSocket endpoint)
+      Matcher:
+        HttpCode: '200,400,403,405'
+      TargetGroupAttributes:
+        - Key: stickiness.enabled
+          Value: 'false'
+      Targets:
+        - Id: !GetAtt AppSyncRealTimeENILookup.IP1
+          Port: 443
+        - Id: !GetAtt AppSyncRealTimeENILookup.IP2
+          Port: 443
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-rt-tg'
+
+  # -------------------------------------------------------------------------
+  # Application Load Balancer (Internal)
+  # -------------------------------------------------------------------------
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${AWS::StackName}-alb'
+      Scheme: internal
+      Type: application
+      Subnets:
+        - !Ref SubnetId1
+        - !Ref SubnetId2
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '60'
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: 'true'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-alb'
+
+  # -------------------------------------------------------------------------
+  # HTTPS Listener
+  # Default action forwards to the GraphQL target group.
+  # Path-based listener rules below override routing for specific paths.
+  # -------------------------------------------------------------------------
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !If
+            - CreateNewCertificate
+            - !Ref Certificate
+            - !Ref ExistingCertificateArn
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AppSyncGraphQLTargetGroup
+
+  # -------------------------------------------------------------------------
+  # Listener Rule 1 – /graphql/realtime (priority 1, more specific path first)
+  # Forwards to the Realtime target group and rewrites the Host header to the
+  # AppSync Realtime endpoint domain so AppSync can identify the correct API.
+  # -------------------------------------------------------------------------
+  ALBListenerRuleRealTime:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListener
+      Priority: 1
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+              - /graphql/realtime
+              - /graphql/realtime/*
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref AppSyncRealTimeTargetGroup
+      Transforms:
+        - Type: host-header-rewrite
+          HostHeaderRewriteConfig:
+            Rewrites:
+              # Replace the entire Host header value with the AppSync Realtime
+              # endpoint domain name so AppSync routes the request correctly.
+              - Regex: "^(.*)$"
+                Replace: !Ref AppSyncRealTimeDomainName
+
+  # -------------------------------------------------------------------------
+  # Listener Rule 2 – /graphql (priority 2)
+  # Forwards to the GraphQL target group and rewrites the Host header to the
+  # AppSync GraphQL endpoint domain so AppSync can identify the correct API.
+  # -------------------------------------------------------------------------
+  ALBListenerRuleGraphQL:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListener
+      Priority: 2
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+              - /graphql
+              - /graphql/*
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref AppSyncGraphQLTargetGroup
+      Transforms:
+        - Type: host-header-rewrite
+          HostHeaderRewriteConfig:
+            Rewrites:
+              # Replace the entire Host header value with the AppSync GraphQL
+              # endpoint domain name so AppSync routes the request correctly.
+              - Regex: "^(.*)$"
+                Replace: !Ref AppSyncDomainName
+
+  # -------------------------------------------------------------------------
+  # Route 53 DNS Record – Alias to ALB
+  # -------------------------------------------------------------------------
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt ApplicationLoadBalancer.DNSName
+        HostedZoneId: !GetAtt ApplicationLoadBalancer.CanonicalHostedZoneID
+        EvaluateTargetHealth: true
+
+# ===========================================================================
+# Outputs
+# ===========================================================================
+Outputs:
+
+  ALBDNSName:
+    Description: Internal ALB DNS name
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+
+  ALBArn:
+    Description: Internal ALB ARN
+    Value: !Ref ApplicationLoadBalancer
+
+  CustomDomainGraphQLEndpoint:
+    Description: AppSync GraphQL endpoint via custom domain
+    Value: !Sub 'https://${DomainName}/graphql'
+
+  CustomDomainRealTimeEndpoint:
+    Description: AppSync Realtime (WebSocket) endpoint via custom domain
+    Value: !Sub 'wss://${DomainName}/graphql/realtime'
+
+  CertificateArnInUse:
+    Description: ACM Certificate ARN attached to the ALB listener
+    Value: !If
+      - CreateNewCertificate
+      - !Ref Certificate
+      - !Ref ExistingCertificateArn
+
+  ALBSecurityGroupId:
+    Description: Security Group ID for the ALB
+    Value: !Ref ALBSecurityGroup
+
+  GraphQLTargetGroupArn:
+    Description: Target Group ARN for the AppSync GraphQL endpoint
+    Value: !Ref AppSyncGraphQLTargetGroup
+
+  RealTimeTargetGroupArn:
+    Description: Target Group ARN for the AppSync Realtime endpoint
+    Value: !Ref AppSyncRealTimeTargetGroup
+
+  GraphQLTargetIP1:
+    Description: First ENI private IP for the AppSync GraphQL VPCE
+    Value: !GetAtt AppSyncGraphQLENILookup.IP1
+
+  GraphQLTargetIP2:
+    Description: Second ENI private IP for the AppSync GraphQL VPCE
+    Value: !GetAtt AppSyncGraphQLENILookup.IP2
+
+  RealTimeTargetIP1:
+    Description: First ENI private IP for the AppSync Realtime VPCE
+    Value: !GetAtt AppSyncRealTimeENILookup.IP1
+
+  RealTimeTargetIP2:
+    Description: Second ENI private IP for the AppSync Realtime VPCE
+    Value: !GetAtt AppSyncRealTimeENILookup.IP2

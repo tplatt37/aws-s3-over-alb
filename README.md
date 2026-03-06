@@ -100,11 +100,19 @@ curl https://yourcustomdomainname.com/prod/healthcheck
 Similar to S3, the ALB's Target Groups have the IPs of the ENIs associated with the Interface Endpoints for the API Gateway service:
 ![API GW over ALB](docs/API%20GW%20via%20AWS%20Client%20VPN.drawio.png)
 
-# AppSync Private API
+# AppSync Private API via ALB
 
-NOTE: AppSync supports custom domain names, but DOES NOT support Private APIs with Custom Domain Names.  To make this work, we'll put an ALB in front of a Private API - but we'll also need Nginx as the target of the ALB to ensure our one custom domain name can handle GraphQL (non-realtime) and WebSocket (realtime) requests.
+As of March 2026, you'll find blog posts that mention Nginx is required to put ALB in front of an AppSync Private API.  I do not believe this is necessary.
 
-The AppSync example is split up into two stacks.
+AppSync supports custom domain names, but DOES NOT support Private APIs with custom domain names.   
+
+We can put an ALB in front of the AppSync Interface Endpoints (just as we have done with the S3 and API Gateway) and use the new-ish Header modification capability to transform the Host header.  This seems to work perfect - No NGINX needed, no "X-AppSync-Domain" header required either. 
+
+This approach is demonstrated with appsync/appsync-via-alb.yaml.  
+
+Please also note there are TWO rules (/graphql for regular requests and /graphql/realtime for WebSocket requests) that modify the Host header appropriately.  This allows us to use one custom domain with both endpoints, just like you can do with Custom Domain Names (public).
+
+The AppSync examples are split up into two stacks.
 
 First, use appsync/appsync-private-lambda-auth.yaml to create the PRIVATE AppSync API.  It's a simple setup using a DynamoDB table, protected with an overly simplistic Lambda Authorizer.
 
@@ -196,11 +204,22 @@ curl -s -X POST "$GRAPHQL_ENDPOINT" \
 
 After you have confirmed the AppSync Private API is working:
 
-Create the appsync-alb.yaml stack to create the ALB sitting in front 
+Create EITHER (or both, I guess) the appsync/appsync-via-alb-nginx.yaml or appsync/appsync-via-alb.yaml stack to create the ALB sitting in front 
+
+Either option works, but obviously, the solution that doesn't require a Target Group of EC2 instances running Nginx would be cheaper and simpler to maintain.
+
+
+## AppSync Private API via ALB and Nginx
+
+As mentioned above, this is not the optimal solution.  But I'm leaving it here to record the Nginx configuration required, in case there is some compelling reason to include Nginx in the architecture in the future.
+
 
 NOTE: This setup will be different.  The Target Group will be an Auto Scaling Group (ASG) of EC2 instances running Nginx.  
 
-This is needed because while ALB can now MODIFY existing Headers (like HOST) it cannot inject headers.  
+I originally explored this technique with the belief that the X-AppSync-Header header would have to be added to the request. Note that at this time an ALB can MODIFY an existing header, but not add a new one.
+
+Experimentation revealed that all the AppSync service really needs is the Host header, which can be easily modified from your custom domain name to the AWS issued domain name.
+
 
 The setup looks like:
 
