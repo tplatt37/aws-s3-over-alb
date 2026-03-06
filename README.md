@@ -260,7 +260,7 @@ As mentioned above, this is not the optimal solution.  But I'm leaving it here t
 
 NOTE: This setup will be different.  The Target Group will be an Auto Scaling Group (ASG) of EC2 instances running Nginx.  
 
-I originally explored this technique with the belief that the X-AppSync-Header header would have to be added to the request. Note that at this time an ALB can MODIFY an existing header, but not add a new one.
+I originally explored this technique with the belief that the X-AppSync-Domain header would have to be added.   
 
 Experimentation revealed that all the AppSync service really needs is the Host header, which can be easily modified from your custom domain name to the AWS issued domain name.
 
