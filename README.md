@@ -102,7 +102,7 @@ Similar to S3, the ALB's Target Groups have the IPs of the ENIs associated with 
 
 # AppSync Private API via ALB
 
-As of March 2026, you'll find blog posts that mention Nginx is required to put ALB in front of an AppSync Private API.  I do not believe this is necessary.
+As of March 2026, you'll find blog posts that mention Nginx is needed in front of an AppSync Private API.  I do not believe this is necessary.
 
 AppSync supports custom domain names, but DOES NOT support Private APIs with custom domain names.   
 
@@ -116,15 +116,20 @@ The AppSync examples are split up into two stacks.
 
 First, use appsync/appsync-private-lambda-auth.yaml to create the PRIVATE AppSync API.  It's a simple setup using a DynamoDB table, protected with an overly simplistic Lambda Authorizer.
 
+## Setup the AppSync Private API and test it
+
 The AppSync template will create a PRIVATE API.  You'll need an AppSync Interface Endpoint to get to it - which is created by the VPN template.
 
+
 You can use the EC2 Jumpbox in the VPN stack to test it (You cannot use the console query feature because it is a PRIVATE API):
+
+NOTE: You are NOT attempting to use the custom domain yet.  These are basic tests run WITHIN THE VPC to make sure the AppSync Private API itself is functional.
 
 ```
 STACK_NAME="appsync-private-api-stack"
 
 # Get the GraphQL endpoint URL
-GRAPHQL_ENDPOINT=$(aws cloudformation describe-stacks \
+ENDPOINT=$(aws cloudformation describe-stacks \
   --stack-name "$STACK_NAME" \
   --query "Stacks[0].Outputs[?OutputKey=='GraphQLEndpoint'].OutputValue" \
   --output text)
@@ -132,13 +137,13 @@ GRAPHQL_ENDPOINT=$(aws cloudformation describe-stacks \
 # Set the token value
 TOKEN="SET_SECRET_TOKEN_VALUE_HERE"
 
-echo "Endpoint: $GRAPHQL_ENDPOINT"
+echo "Endpoint: $ENDPOINT"
 echo "Authorization:  $TOKEN"
 ```
 
 Create an Item (a Mutation)
 ```
-curl -s -X POST "$GRAPHQL_ENDPOINT" \
+curl -s -X POST "$ENDPOINT/graphql" \
   -H "Content-Type: application/json" \
   -H "Authorization: $TOKEN" \
   -d '{
@@ -155,7 +160,7 @@ curl -s -X POST "$GRAPHQL_ENDPOINT" \
 
 Get an Item (Query)
 ```
-curl -s -X POST "$GRAPHQL_ENDPOINT" \
+curl -s -X POST "$ENDPOINT" \
   -H "Content-Type: application/json" \
   -H "Authorization: $TOKEN" \
   -d '{
@@ -166,7 +171,7 @@ curl -s -X POST "$GRAPHQL_ENDPOINT" \
 
 List all Items (Query)
 ```
-curl -s -X POST "$GRAPHQL_ENDPOINT" \
+curl -s -X POST "$ENDPOINT" \
   -H "Content-Type: application/json" \
   -H "Authorization: $TOKEN" \
   -d '{
@@ -176,7 +181,7 @@ curl -s -X POST "$GRAPHQL_ENDPOINT" \
 
 Update an Item (Mutation)
 ```
-curl -s -X POST "$GRAPHQL_ENDPOINT" \
+curl -s -X POST "$ENDPOINT" \
   -H "Content-Type: application/json" \
   -H "Authorization: $TOKEN" \
   -d '{
@@ -193,7 +198,7 @@ curl -s -X POST "$GRAPHQL_ENDPOINT" \
 
 Delete an Item (Mutation)
 ```
-curl -s -X POST "$GRAPHQL_ENDPOINT" \
+curl -s -X POST "$ENDPOINT" \
   -H "Content-Type: application/json" \
   -H "Authorization: $TOKEN" \
   -d '{
@@ -202,12 +207,51 @@ curl -s -X POST "$GRAPHQL_ENDPOINT" \
   }' | python3 -m json.tool
 ```
 
-After you have confirmed the AppSync Private API is working:
+
+
+## Setup an ALB to make the Private API accessible remotely over VPN
+
+
+After you have confirmed the AppSync Private API is working...
 
 Create EITHER (or both, I guess) the appsync/appsync-via-alb-nginx.yaml or appsync/appsync-via-alb.yaml stack to create the ALB sitting in front 
 
-Either option works, but obviously, the solution that doesn't require a Target Group of EC2 instances running Nginx would be cheaper and simpler to maintain.
+Either option works, but obviously, the solution that does NOT require a Target Group of EC2 instances running Nginx would be cheaper and simpler to maintain.
 
+NOTE: [As per the AWS documentation](https://docs.aws.amazon.com/appsync/latest/devguide/real-time-websocket-client.html), to use the Private API for WebSocket/Realtime you will need to pass the Base64 encoded Host and relevent Authentication as "header" and empty JSON {} as "payload" in the querystring.  These are essential for the process.
+
+My experiements conclude that you DO NOT need "X-AppSync-Domain" header.   
+
+See curl-lambda.sh (Invoking Graphql via CURL) and ws-lambda (Invoking WebSocket via wscat) for examples of usage of the header and payload query strings
+
+![AppSync via ALB](docs/AppSync%20Simplest%20Solution-Updated.drawio.png)
+
+## Testing the AppSync Private API via ALB
+
+From ANY machine that has connectivity to the ALB:
+
+set TOKEN and ENDPOINT environment variables.
+
+ENDPOINT should be your custom domain name
+
+To test this one, modify test-appsync-over-alb.sh with your custom domain, then run:
+(After setting environment variables used by the script)
+```
+./curl-lambda.sh
+```
+
+
+You should see valid JSON output.
+
+## Testing Web Socket
+
+Also set HOST to the appsync-api Domain Name.
+
+The realtime endpoint (WebSocket) should work as well.
+(After setting values)
+```
+./ws-lambda.sh
+```
 
 ## AppSync Private API via ALB and Nginx
 
@@ -223,7 +267,7 @@ Experimentation revealed that all the AppSync service really needs is the Host h
 
 The setup looks like:
 
-![AppSync via ALB](docs/AppSync%20via%20AWS%20Client%20VPN.drawio.svg)
+![AppSync via ALB with NGINX](docs/AppSync%20via%20AWS%20Client%20VPN.drawio.svg)
 
 
 It doesn't have to be running on EC2s - a Fargate service running under ECS would work great too.
@@ -231,20 +275,4 @@ It doesn't have to be running on EC2s - a Fargate service running under ECS woul
 See the details of the LaunchTemplate in the appsync-alb.yaml file to see how NGINX needs to be configured.
 
 
-To test this one, modify test-appsync-over-alb.sh with your custom domain, then run:
-(After setting environment variables used by the script)
-```
-./curl-lambda.sh
-```
-
-
-You should see valid JSON output.
-
-## Testing Web Socket
-
-The realtime endpoint (WebSocket) should work as well.
-(After setting values)
-```
-./ws-lambda.sh
-```
 

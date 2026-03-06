@@ -20,6 +20,8 @@ echo "HEADER_JSON=$HEADER_JSON"
 HEADER_B64=$(echo -n "$HEADER_JSON" | base64 -w 0)
 echo "HEADER_B64=$HEADER_B64"
 
+# e30= is {} base64 encoded.  This empty JSON payload is required
+
 # --- Connect ---
 URL="wss://${ENDPOINT}/graphql/realtime?header=${HEADER_B64}&payload=e30="
 echo $URL
